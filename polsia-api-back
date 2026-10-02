@@ -1,0 +1,1215 @@
+cd ~/projects/polsia
+cat > setup_api.sh << 'ENDOFSCRIPT'
+#!/bin/bash
+set -e
+
+mkdir -p polsia-api/{src/{routes,services,middleware,lib},prisma}
+cd polsia-api
+
+# ─────────────────────────────────────
+# PACKAGE.JSON
+# ─────────────────────────────────────
+cat > package.json << 'EOF'
+{
+  "name": "polsia-api",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "npx ts-node-dev --respawn --transpile-only src/app.ts",
+    "build": "tsc",
+    "start": "node dist/app.js",
+    "db:migrate": "prisma migrate dev",
+    "db:generate": "prisma generate",
+    "db:reset": "prisma migrate reset"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.14.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.0",
+    "prisma": "^5.14.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.5"
+  }
+}
+EOF
+
+# ─────────────────────────────────────
+# TSCONFIG
+# ─────────────────────────────────────
+cat > tsconfig.json << 'EOF'
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "commonjs",
+    "lib": ["es2020"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
+EOF
+
+# ─────────────────────────────────────
+# ENV FILES
+# ─────────────────────────────────────
+cat > .env << 'EOF'
+DATABASE_URL="postgresql://polsia:polsia_dev_pw@localhost:5432/polsia_dev"
+PORT=4000
+POLYGON_AMOY_RPC="https://rpc-amoy.polygon.technology"
+FACTORY_ADDRESS_TESTNET=""
+DEPLOYER_PRIVATE_KEY=""
+PLATFORM_TREASURY_ADDRESS=""
+POLYGON_RPC=""
+FACTORY_ADDRESS_MAINNET=""
+EOF
+
+cat > .gitignore << 'EOF'
+node_modules
+dist
+.env
+EOF
+
+# ─────────────────────────────────────
+# PRISMA SCHEMA
+# ─────────────────────────────────────
+cat > prisma/schema.prisma << 'EOF'
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum BusinessGoal {
+  SINGLE_RELEASE
+  CATALOG_BUILD
+  NFT_CAMPAIGN
+  FULL_SUITE
+}
+
+enum BudgetTier {
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum PipelineMode {
+  AI_DRAFT
+  HYBRID
+  STUDIO_PRODUCED
+}
+
+enum AssetStatus {
+  DRAFT
+  GENERATING
+  HUMAN_REVIEW
+  APPROVED
+  PUBLISHED
+}
+
+enum JobType {
+  AUDIO_COMPOSITION
+  AUDIO_MIX
+  VIDEO_RENDER
+  VIDEO_EDIT
+  VOICE_CLONE
+  TEASER_CUT
+}
+
+enum JobStage {
+  QUEUED
+  PROCESSING
+  NEEDS_HUMAN_INPUT
+  HUMAN_IN_PROGRESS
+  COMPLETE
+  FAILED
+}
+
+enum Chain {
+  POLYGON
+  BASE
+  ETHEREUM
+}
+
+enum DeploymentStatus {
+  DRAFT
+  TESTNET
+  MAINNET
+}
+
+enum TierName {
+  COLLECTOR
+  SUPERFAN
+  INVESTOR
+}
+
+enum TransactionType {
+  NFT_PRIMARY_SALE
+  NFT_SECONDARY_ROYALTY
+  STREAMING_ROYALTY
+  LICENSING_DEAL
+}
+
+enum ConfidenceLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ScenarioType {
+  CONSERVATIVE
+  MODERATE
+  VIRAL
+  BREAKOUT
+}
+
+enum PlanStatus {
+  IN_PROGRESS
+  FINALIZED
+  DEPLOYED
+}
+
+enum AdminRole {
+  PRODUCER
+  EDITOR
+  QA_REVIEWER
+  PLATFORM_ADMIN
+}
+
+enum Platform {
+  INSTAGRAM
+  TIKTOK
+  SPOTIFY
+  YOUTUBE
+  TWITTER
+  SNAPCHAT
+}
+
+model Client {
+  id               String          @id @default(uuid())
+  artistName       String
+  slug             String          @unique
+  businessGoal     BusinessGoal
+  budgetTier       BudgetTier
+  onboardingDone   Boolean         @default(false)
+  createdAt        DateTime        @default(now())
+  brandProfile     BrandProfile?
+  audienceSnaps    AudienceSnapshot[]
+  songs            Song[]
+  businessPlans    BusinessPlan[]
+  @@map("clients")
+}
+
+model BrandProfile {
+  id               String   @id @default(uuid())
+  clientId         String   @unique
+  client           Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  genres           String[]
+  voiceRefUrl      String?
+  logoUrl          String?
+  colorPalette     String[]
+  toneDescriptor   String?
+  @@map("brand_profiles")
+}
+
+model AudienceSnapshot {
+  id              String   @id @default(uuid())
+  clientId        String
+  client          Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  platform        Platform
+  followerCount   Int
+  engagementRate  Float
+  capturedAt      DateTime @default(now())
+  @@index([clientId, platform, capturedAt])
+  @@map("audience_snapshots")
+}
+
+model Song {
+  id                String          @id @default(uuid())
+  clientId          String
+  client            Client          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  title             String
+  lyricsInput       String?
+  moodValue         Float           @default(0.5)
+  tempoBpm          Int?
+  musicalKey        String?
+  referenceTrackUrl String?
+  audioOutputUrl    String?
+  pipelineMode      PipelineMode    @default(AI_DRAFT)
+  status            AssetStatus     @default(DRAFT)
+  createdAt         DateTime        @default(now())
+  video             Video?
+  generationJobs    GenerationJob[]
+  nftContract       NFTContract?
+  valuations        Valuation[]
+  campaigns         MarketingCampaign[]
+  businessPlans     BusinessPlan[]
+  transactions      RevenueTransaction[]
+  @@map("songs")
+}
+
+model Video {
+  id               String          @id @default(uuid())
+  songId           String          @unique
+  song             Song            @relation(fields: [songId], references: [id], onDelete: Cascade)
+  styleRefUrls     String[]
+  colorPalette     String[]
+  scenePrompts     String[]
+  cameraStyle      String?
+  videoOutputUrl   String?
+  pipelineMode     PipelineMode    @default(AI_DRAFT)
+  status           AssetStatus     @default(DRAFT)
+  generationJobs   GenerationJob[]
+  @@map("videos")
+}
+
+model GenerationJob {
+  id            String     @id @default(uuid())
+  songId        String?
+  song          Song?      @relation(fields: [songId], references: [id], onDelete: Cascade)
+  videoId       String?
+  video         Video?     @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  jobType       JobType
+  stage         JobStage   @default(QUEUED)
+  assignedToId  String?
+  assignedTo    AdminUser? @relation(fields: [assignedToId], references: [id])
+  etaEstimate   DateTime?
+  modelVersion  String?
+  createdAt     DateTime   @default(now())
+  completedAt   DateTime?
+  @@index([stage])
+  @@map("generation_jobs")
+}
+
+model NFTContract {
+  id               String           @id @default(uuid())
+  songId           String           @unique
+  song             Song             @relation(fields: [songId], references: [id], onDelete: Cascade)
+  chain            Chain
+  contractAddress  String?
+  deployStatus     DeploymentStatus @default(DRAFT)
+  royaltyBps       Int              @default(1000)
+  deployedAt       DateTime?
+  tiers            NFTTier[]
+  @@map("nft_contracts")
+}
+
+model NFTTier {
+  id              String       @id @default(uuid())
+  nftContractId   String
+  nftContract     NFTContract  @relation(fields: [nftContractId], references: [id], onDelete: Cascade)
+  tierName        TierName
+  supplyTotal     Int
+  supplyMinted    Int          @default(0)
+  priceUsd        Decimal      @db.Decimal(10, 2)
+  unlockPerks     String[]
+  royaltyShareBps Int?
+  transactions    RevenueTransaction[]
+  @@map("nft_tiers")
+}
+
+model RevenueTransaction {
+  id              String          @id @default(uuid())
+  nftTierId       String?
+  nftTier         NFTTier?        @relation(fields: [nftTierId], references: [id])
+  songId          String
+  song            Song            @relation(fields: [songId], references: [id], onDelete: Cascade)
+  type            TransactionType
+  amountUsd       Decimal         @db.Decimal(12, 2)
+  buyerWallet     String?
+  txHash          String?
+  occurredAt      DateTime        @default(now())
+  @@index([songId, occurredAt])
+  @@map("revenue_transactions")
+}
+
+model Valuation {
+  id              String          @id @default(uuid())
+  songId          String
+  song            Song            @relation(fields: [songId], references: [id], onDelete: Cascade)
+  pointEstimate   Decimal         @db.Decimal(12, 2)
+  rangeLow        Decimal         @db.Decimal(12, 2)
+  rangeHigh       Decimal         @db.Decimal(12, 2)
+  confidence      ConfidenceLevel
+  factorBreakdown Json
+  calculatedAt    DateTime        @default(now())
+  @@index([songId, calculatedAt])
+  @@map("valuations")
+}
+
+model BusinessPlan {
+  id              String             @id @default(uuid())
+  clientId        String
+  client          Client             @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  songId          String?
+  song            Song?              @relation(fields: [songId], references: [id])
+  selectedTier    BudgetTier
+  status          PlanStatus         @default(IN_PROGRESS)
+  pdfUrl          String?
+  createdAt       DateTime           @default(now())
+  finalizedAt     DateTime?
+  financialModel  FinancialModel?
+  checklist       DeployChecklist?
+  scenarios       ScenarioModel[]
+  @@map("business_plans")
+}
+
+model FinancialModel {
+  id                    String       @id @default(uuid())
+  businessPlanId        String       @unique
+  businessPlan          BusinessPlan @relation(fields: [businessPlanId], references: [id], onDelete: Cascade)
+  computeCost           Decimal      @db.Decimal(10, 2)
+  humanCost             Decimal      @db.Decimal(10, 2)
+  marketingSpend        Decimal      @db.Decimal(10, 2)
+  platformFeePct        Float        @default(0.20)
+  artistSplitPct        Float        @default(0.70)
+  mktgReinvestPct       Float        @default(0.10)
+  breakevenUnits        Int?
+  breakevenTimeline     String?
+  @@map("financial_models")
+}
+
+model DeployChecklist {
+  id             String       @id @default(uuid())
+  businessPlanId String       @unique
+  businessPlan   BusinessPlan @relation(fields: [businessPlanId], references: [id], onDelete: Cascade)
+  items          Json
+  allComplete    Boolean      @default(false)
+  @@map("deploy_checklists")
+}
+
+model ScenarioModel {
+  id                 String       @id @default(uuid())
+  businessPlanId     String
+  businessPlan       BusinessPlan @relation(fields: [businessPlanId], references: [id], onDelete: Cascade)
+  scenarioType       ScenarioType
+  reachLow           Int
+  reachHigh          Int
+  sellThroughPct     Float
+  revLow             Decimal      @db.Decimal(12, 2)
+  revHigh            Decimal      @db.Decimal(12, 2)
+  probability        Float
+  @@map("scenario_models")
+}
+
+model MarketingCampaign {
+  id           String    @id @default(uuid())
+  songId       String
+  song         Song      @relation(fields: [songId], references: [id], onDelete: Cascade)
+  platform     Platform
+  assetUrl     String
+  scheduledAt  DateTime
+  postedAt     DateTime?
+  metrics      Json?
+  @@map("marketing_campaigns")
+}
+
+model AdminUser {
+  id             String          @id @default(uuid())
+  name           String
+  role           AdminRole
+  activeJobCount Int             @default(0)
+  jobs           GenerationJob[]
+  @@map("admin_users")
+}
+EOF
+
+# ─────────────────────────────────────
+# PRISMA CLIENT
+# ─────────────────────────────────────
+cat > src/lib/prisma.ts << 'EOF'
+import { PrismaClient } from '@prisma/client';
+export const prisma = new PrismaClient({ log: ['warn', 'error'] });
+EOF
+
+# ─────────────────────────────────────
+# ERROR HANDLER MIDDLEWARE
+# ─────────────────────────────────────
+cat > src/middleware/errorHandler.ts << 'EOF'
+import { Request, Response, NextFunction } from 'express';
+
+export function errorHandler(err: any, _req: Request, res: Response, _next: NextFunction) {
+  console.error('[API Error]', err);
+  const status = err.statusCode || err.status || 500;
+  res.status(status).json({
+    error: err.message || 'Internal server error',
+    ...(process.env.NODE_ENV !== 'production' && { stack: err.stack }),
+  });
+}
+EOF
+
+# ─────────────────────────────────────
+# WEBSOCKET SERVICE
+# ─────────────────────────────────────
+cat > src/services/websocket.service.ts << 'EOF'
+import { Server } from 'socket.io';
+import { Server as HttpServer } from 'http';
+
+let io: Server;
+
+export function initWebSocket(httpServer: HttpServer) {
+  io = new Server(httpServer, { cors: { origin: '*' } });
+
+  io.on('connection', (socket) => {
+    socket.on('subscribe:job', (jobId: string) => socket.join(`job:${jobId}`));
+    socket.on('subscribe:valuation', (songId: string) => socket.join(`valuation:${songId}`));
+    socket.on('subscribe:nft', (contractId: string) => socket.join(`nft:${contractId}`));
+  });
+
+  return io;
+}
+
+export function broadcastJobUpdate(jobId: string, stage: string) {
+  io?.to(`job:${jobId}`).emit('job:update', { jobId, stage, timestamp: new Date() });
+}
+
+export function broadcastValuationUpdate(songId: string, valuation: any) {
+  io?.to(`valuation:${songId}`).emit('valuation:update', valuation);
+}
+
+export function broadcastNFTActivity(contractId: string, tierData: any) {
+  io?.to(`nft:${contractId}`).emit('nft:tier_sold', tierData);
+}
+EOF
+
+# ─────────────────────────────────────
+# GENERATION QUEUE SERVICE
+# ─────────────────────────────────────
+cat > src/services/generationQueue.service.ts << 'EOF'
+import { prisma } from '../lib/prisma';
+import { broadcastJobUpdate } from './websocket.service';
+import { JobType, JobStage } from '@prisma/client';
+
+interface EnqueueParams {
+  songId?: string;
+  videoId?: string;
+  jobType: JobType;
+  modelVersion?: string;
+}
+
+export async function enqueueGenerationJob(params: EnqueueParams) {
+  const job = await prisma.generationJob.create({
+    data: {
+      songId: params.songId,
+      videoId: params.videoId,
+      jobType: params.jobType,
+      modelVersion: params.modelVersion,
+      stage: 'QUEUED',
+    },
+  });
+
+  broadcastJobUpdate(job.id, 'QUEUED');
+  processJob(job.id, params.jobType);
+  return job;
+}
+
+async function processJob(jobId: string, jobType: JobType) {
+  const AI_JOBS: JobType[] = ['AUDIO_COMPOSITION', 'VIDEO_RENDER', 'TEASER_CUT', 'VOICE_CLONE'];
+  const HUMAN_JOBS: JobType[] = ['AUDIO_MIX', 'VIDEO_EDIT'];
+
+  await updateJobStage(jobId, 'PROCESSING');
+
+  if (AI_JOBS.includes(jobType)) {
+    // Placeholder: in production, call self-hosted inference endpoint
+    setTimeout(() => updateJobStage(jobId, 'COMPLETE'), 5000);
+  }
+  if (HUMAN_JOBS.includes(jobType)) {
+    await updateJobStage(jobId, 'NEEDS_HUMAN_INPUT');
+  }
+}
+
+export async function updateJobStage(jobId: string, stage: JobStage) {
+  const job = await prisma.generationJob.update({
+    where: { id: jobId },
+    data: {
+      stage,
+      completedAt: stage === 'COMPLETE' ? new Date() : undefined,
+    },
+  });
+
+  broadcastJobUpdate(jobId, stage);
+
+  if (stage === 'COMPLETE' && job.songId) {
+    await prisma.song.update({
+      where: { id: job.songId },
+      data: { status: 'HUMAN_REVIEW' },
+    });
+  }
+
+  return job;
+}
+EOF
+
+# ─────────────────────────────────────
+# VALUATION SERVICE
+# ─────────────────────────────────────
+cat > src/services/valuation.service.ts << 'EOF'
+import { prisma } from '../lib/prisma';
+
+export async function calculateValuation(songId: string) {
+  const song = await prisma.song.findUniqueOrThrow({
+    where: { id: songId },
+    include: { client: { include: { audienceSnaps: true } } },
+  });
+
+  // Stub scoring — replace with real model per valuation engine spec
+  const audienceScore = scoreAudienceReach(song.client);
+  const compsScore = 3000;
+  const royaltyScore = 2000;
+  const licensingScore = 1500;
+  const scarcityScore = 1000;
+
+  const weights = { audience: 0.30, comps: 0.25, royalty: 0.25, licensing: 0.10, scarcity: 0.10 };
+
+  const pointEstimate =
+    audienceScore * weights.audience +
+    compsScore * weights.comps +
+    royaltyScore * weights.royalty +
+    licensingScore * weights.licensing +
+    scarcityScore * weights.scarcity;
+
+  const factorBreakdown = {
+    audience_reach: { weight: weights.audience, score: audienceScore },
+    comparable_sales: { weight: weights.comps, score: compsScore },
+    royalty_npv: { weight: weights.royalty, score: royaltyScore },
+    licensing: { weight: weights.licensing, score: licensingScore },
+    scarcity: { weight: weights.scarcity, score: scarcityScore },
+  };
+
+  return prisma.valuation.create({
+    data: {
+      songId,
+      pointEstimate,
+      rangeLow: pointEstimate * 0.6,
+      rangeHigh: pointEstimate * 1.8,
+      confidence: 'MEDIUM',
+      factorBreakdown,
+    },
+  });
+}
+
+function scoreAudienceReach(client: any): number {
+  const snaps = client.audienceSnaps || [];
+  const totalFollowers = snaps.reduce((sum: number, s: any) => sum + s.followerCount, 0);
+  return Math.min(totalFollowers * 0.5, 10000);
+}
+EOF
+
+# ─────────────────────────────────────
+# PDF GENERATOR SERVICE (stub)
+# ─────────────────────────────────────
+cat > src/services/pdfGenerator.service.ts << 'EOF'
+export async function generatePlanPdf(planId: string): Promise<string> {
+  // Stub — in production use puppeteer or @react-pdf/renderer
+  console.log(`[PDF] Generating business plan PDF for ${planId}`);
+  return `https://storage.polsia.com/plans/${planId}.pdf`;
+}
+EOF
+
+# ─────────────────────────────────────
+# ROUTES: CLIENTS
+# ─────────────────────────────────────
+cat > src/routes/clients.routes.ts << 'EOF'
+import { Router } from 'express';
+import { prisma } from '../lib/prisma';
+
+const router = Router();
+
+router.post('/', async (req, res, next) => {
+  try {
+    const { artistName, slug, businessGoal, budgetTier, brand } = req.body;
+    const client = await prisma.client.create({
+      data: {
+        artistName,
+        slug,
+        businessGoal,
+        budgetTier,
+        brandProfile: brand ? { create: brand } : undefined,
+      },
+      include: { brandProfile: true },
+    });
+    res.status(201).json(client);
+  } catch (err) { next(err); }
+});
+
+router.get('/:id', async (req, res, next) => {
+  try {
+    const client = await prisma.client.findUniqueOrThrow({
+      where: { id: req.params.id },
+      include: { brandProfile: true, audienceSnaps: true, songs: true },
+    });
+    res.json(client);
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/audience-snapshot', async (req, res, next) => {
+  try {
+    const snap = await prisma.audienceSnapshot.create({
+      data: { clientId: req.params.id, ...req.body },
+    });
+    res.status(201).json(snap);
+  } catch (err) { next(err); }
+});
+
+export default router;
+EOF
+
+# ─────────────────────────────────────
+# ROUTES: SONGS
+# ─────────────────────────────────────
+cat > src/routes/songs.routes.ts << 'EOF'
+import { Router } from 'express';
+import { prisma } from '../lib/prisma';
+import { enqueueGenerationJob } from '../services/generationQueue.service';
+
+const router = Router();
+
+router.post('/', async (req, res, next) => {
+  try {
+    const { clientId, title, lyricsInput, moodValue, tempoBpm, musicalKey, referenceTrackUrl } = req.body;
+    const song = await prisma.song.create({
+      data: { clientId, title, lyricsInput, moodValue, tempoBpm, musicalKey, referenceTrackUrl },
+    });
+    res.status(201).json(song);
+  } catch (err) { next(err); }
+});
+
+router.get('/:id', async (req, res, next) => {
+  try {
+    const song = await prisma.song.findUniqueOrThrow({
+      where: { id: req.params.id },
+      include: { video: true, nftContract: { include: { tiers: true } }, valuations: true },
+    });
+    res.json(song);
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/generate', async (req, res, next) => {
+  try {
+    const { pipelineMode = 'HYBRID' } = req.body;
+    const song = await prisma.song.update({
+      where: { id: req.params.id },
+      data: { status: 'GENERATING', pipelineMode },
+    });
+
+    const job = await enqueueGenerationJob({
+      songId: song.id,
+      jobType: 'AUDIO_COMPOSITION',
+      modelVersion: 'polsia-sound-v0.1-hybrid',
+    });
+
+    if (pipelineMode === 'HYBRID') {
+      await enqueueGenerationJob({ songId: song.id, jobType: 'AUDIO_MIX' });
+    }
+
+    res.json({ song, jobId: job.id });
+  } catch (err) { next(err); }
+});
+
+router.get('/:id/jobs', async (req, res, next) => {
+  try {
+    const jobs = await prisma.generationJob.findMany({
+      where: { songId: req.params.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json(jobs);
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/approve', async (req, res, next) => {
+  try {
+    const song = await prisma.song.update({
+      where: { id: req.params.id },
+      data: { status: 'APPROVED' },
+    });
+    res.json(song);
+  } catch (err) { next(err); }
+});
+
+export default router;
+EOF
+
+# ─────────────────────────────────────
+# ROUTES: VIDEOS
+# ─────────────────────────────────────
+cat > src/routes/videos.routes.ts << 'EOF'
+import { Router } from 'express';
+import { prisma } from '../lib/prisma';
+import { enqueueGenerationJob } from '../services/generationQueue.service';
+
+const router = Router();
+
+router.post('/', async (req, res, next) => {
+  try {
+    const { songId, styleRefUrls, colorPalette, scenePrompts, cameraStyle } = req.body;
+    const video = await prisma.video.create({
+      data: { songId, styleRefUrls: styleRefUrls || [], colorPalette: colorPalette || [], scenePrompts: scenePrompts || [], cameraStyle },
+    });
+    res.status(201).json(video);
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/generate', async (req, res, next) => {
+  try {
+    await prisma.video.update({ where: { id: req.params.id }, data: { status: 'GENERATING' } });
+    const job = await enqueueGenerationJob({ videoId: req.params.id, jobType: 'VIDEO_RENDER' });
+    await enqueueGenerationJob({ videoId: req.params.id, jobType: 'VIDEO_EDIT' });
+    res.json({ videoId: req.params.id, jobId: job.id });
+  } catch (err) { next(err); }
+});
+
+export default router;
+EOF
+
+# ─────────────────────────────────────
+# ROUTES: NFT
+# ─────────────────────────────────────
+cat > src/routes/nft.routes.ts << 'EOF'
+import { Router } from 'express';
+import { prisma } from '../lib/prisma';
+
+const router = Router();
+
+router.post('/configure', async (req, res, next) => {
+  try {
+    const { songId, chain, royaltyBps, tiers } = req.body;
+
+    const nftContract = await prisma.nFTContract.create({
+      data: {
+        songId,
+        chain,
+        royaltyBps,
+        tiers: {
+          create: tiers.map((t: any) => ({
+            tierName: t.tierName,
+            supplyTotal: t.supplyTotal,
+            priceUsd: t.priceUsd,
+            unlockPerks: t.unlockPerks || [],
+            royaltyShareBps: t.royaltyShareBps,
+          })),
+        },
+      },
+      include: { tiers: true },
+    });
+
+    res.status(201).json(nftContract);
+  } catch (err) { next(err); }
+});
+
+router.get('/:songId', async (req, res, next) => {
+  try {
+    const contract = await prisma.nFTContract.findUniqueOrThrow({
+      where: { songId: req.params.songId },
+      include: { tiers: true },
+    });
+    res.json(contract);
+  } catch (err) { next(err); }
+});
+
+router.post('/deploy', async (req, res, next) => {
+  try {
+    const { songId, network } = req.body;
+    // Stub: in production, calls Hardhat deploy script or Gnosis Safe SDK
+    const contract = await prisma.nFTContract.update({
+      where: { songId },
+      data: {
+        deployStatus: network === 'mainnet' ? 'MAINNET' : 'TESTNET',
+        contractAddress: `0x${Date.now().toString(16).padStart(40, '0')}`,
+        deployedAt: new Date(),
+      },
+      include: { tiers: true },
+    });
+    res.json(contract);
+  } catch (err) { next(err); }
+});
+
+export default router;
+EOF
+
+# ─────────────────────────────────────
+# ROUTES: VALUATION
+# ─────────────────────────────────────
+cat > src/routes/valuation.routes.ts << 'EOF'
+import { Router } from 'express';
+import { prisma } from '../lib/prisma';
+import { calculateValuation } from '../services/valuation.service';
+
+const router = Router();
+
+router.get('/:songId', async (req, res, next) => {
+  try {
+    const v = await prisma.valuation.findFirst({
+      where: { songId: req.params.songId },
+      orderBy: { calculatedAt: 'desc' },
+    });
+    res.json(v);
+  } catch (err) { next(err); }
+});
+
+router.get('/:songId/history', async (req, res, next) => {
+  try {
+    const history = await prisma.valuation.findMany({
+      where: { songId: req.params.songId },
+      orderBy: { calculatedAt: 'asc' },
+    });
+    res.json(history);
+  } catch (err) { next(err); }
+});
+
+router.post('/:songId/recalculate', async (req, res, next) => {
+  try {
+    const result = await calculateValuation(req.params.songId);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+export default router;
+EOF
+
+# ─────────────────────────────────────
+# ROUTES: BUSINESS PLAN
+# ─────────────────────────────────────
+cat > src/routes/businessPlan.routes.ts << 'EOF'
+import { Router } from 'express';
+import { prisma } from '../lib/prisma';
+import { generatePlanPdf } from '../services/pdfGenerator.service';
+
+const router = Router();
+
+router.post('/', async (req, res, next) => {
+  try {
+    const { clientId, songId, selectedTier } = req.body;
+
+    const plan = await prisma.businessPlan.create({
+      data: { clientId, songId, selectedTier },
+    });
+
+    await prisma.scenarioModel.createMany({
+      data: [
+        { businessPlanId: plan.id, scenarioType: 'CONSERVATIVE', reachLow: 10000, reachHigh: 50000, sellThroughPct: 0.15, revLow: 2000, revHigh: 5000, probability: 0.50 },
+        { businessPlanId: plan.id, scenarioType: 'MODERATE', reachLow: 500000, reachHigh: 2000000, sellThroughPct: 0.60, revLow: 20000, revHigh: 60000, probability: 0.35 },
+        { businessPlanId: plan.id, scenarioType: 'VIRAL', reachLow: 10000000, reachHigh: 50000000, sellThroughPct: 1.0, revLow: 150000, revHigh: 500000, probability: 0.10 },
+        { businessPlanId: plan.id, scenarioType: 'BREAKOUT', reachLow: 0, reachHigh: 0, sellThroughPct: 1.0, revLow: 500000, revHigh: 5000000, probability: 0.05 },
+      ],
+    });
+
+    await prisma.deployChecklist.create({
+      data: {
+        businessPlanId: plan.id,
+        items: [
+          { label: 'Artist onboarding complete', status: 'done' },
+          { label: 'Voice/style model fine-tuned', status: 'pending' },
+          { label: 'Song approved', status: 'pending' },
+          { label: 'Video finishing', status: 'pending' },
+          { label: 'NFT contract deployed', status: 'pending' },
+          { label: 'Landing page generated', status: 'pending' },
+          { label: 'Marketing calendar scheduled', status: 'pending' },
+          { label: 'Valuation report finalized', status: 'pending' },
+          { label: 'Launch date confirmed', status: 'pending' },
+        ],
+      },
+    });
+
+    res.status(201).json(plan);
+  } catch (err) { next(err); }
+});
+
+router.get('/:id/methodology', async (req, res, next) => {
+  try {
+    const plan = await prisma.businessPlan.findUniqueOrThrow({
+      where: { id: req.params.id },
+      include: { song: { include: { valuations: { orderBy: { calculatedAt: 'desc' }, take: 1 } } } },
+    });
+    const v = plan.song?.valuations[0];
+    res.json({
+      factorBreakdown: v?.factorBreakdown ?? null,
+      pointEstimate: v?.pointEstimate ?? 0,
+      range: { low: v?.rangeLow ?? 0, high: v?.rangeHigh ?? 0 },
+      confidence: v?.confidence ?? 'LOW',
+    });
+  } catch (err) { next(err); }
+});
+
+router.get('/:id/scenarios', async (req, res, next) => {
+  try {
+    const scenarios = await prisma.scenarioModel.findMany({
+      where: { businessPlanId: req.params.id },
+    });
+    const expectedValue = scenarios.reduce((sum, s) => {
+      const mid = (Number(s.revLow) + Number(s.revHigh)) / 2;
+      return sum + mid * s.probability;
+    }, 0);
+    res.json({ scenarios, expectedValue });
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/finalize', async (req, res, next) => {
+  try {
+    const pdfUrl = await generatePlanPdf(req.params.id);
+    const plan = await prisma.businessPlan.update({
+      where: { id: req.params.id },
+      data: { status: 'FINALIZED', finalizedAt: new Date(), pdfUrl },
+    });
+    res.json(plan);
+  } catch (err) { next(err); }
+});
+
+router.get('/:id/checklist', async (req, res, next) => {
+  try {
+    const cl = await prisma.deployChecklist.findUnique({
+      where: { businessPlanId: req.params.id },
+    });
+    res.json(cl);
+  } catch (err) { next(err); }
+});
+
+export default router;
+EOF
+
+# ─────────────────────────────────────
+# ROUTES: DASHBOARD
+# ─────────────────────────────────────
+cat > src/routes/dashboard.routes.ts << 'EOF'
+import { Router } from 'express';
+import { prisma } from '../lib/prisma';
+
+const router = Router();
+
+router.get('/:clientId/overview', async (req, res, next) => {
+  try {
+    const songs = await prisma.song.findMany({
+      where: { clientId: req.params.clientId },
+      include: {
+        valuations: { orderBy: { calculatedAt: 'desc' }, take: 1 },
+        transactions: true,
+        nftContract: { include: { tiers: true } },
+      },
+    });
+
+    const totalRevenue = songs.reduce((sum, s) =>
+      sum + s.transactions.reduce((ts, t) => ts + Number(t.amountUsd), 0), 0
+    );
+
+    const latestValuation = songs[0]?.valuations[0]?.pointEstimate ?? 0;
+
+    const totalMinted = songs.reduce((sum, s) =>
+      sum + (s.nftContract?.tiers.reduce((ts, t) => ts + t.supplyMinted, 0) ?? 0), 0
+    );
+
+    const totalSupply = songs.reduce((sum, s) =>
+      sum + (s.nftContract?.tiers.reduce((ts, t) => ts + t.supplyTotal, 0) ?? 0), 0
+    );
+
+    res.json({
+      currentValue: Number(latestValuation),
+      revenueMtd: totalRevenue,
+      nftsSold: `${totalMinted} / ${totalSupply}`,
+      reachTrend: [],
+      valuationTrend: [],
+    });
+  } catch (err) { next(err); }
+});
+
+router.get('/:clientId/revenue', async (req, res, next) => {
+  try {
+    const txns = await prisma.revenueTransaction.findMany({
+      where: { song: { clientId: req.params.clientId } },
+      orderBy: { occurredAt: 'desc' },
+    });
+    res.json(txns);
+  } catch (err) { next(err); }
+});
+
+export default router;
+EOF
+
+# ─────────────────────────────────────
+# ROUTES: ADMIN
+# ─────────────────────────────────────
+cat > src/routes/admin.routes.ts << 'EOF'
+import { Router } from 'express';
+import { prisma } from '../lib/prisma';
+import { updateJobStage } from '../services/generationQueue.service';
+
+const router = Router();
+
+router.get('/review-queue', async (req, res, next) => {
+  try {
+    const jobs = await prisma.generationJob.findMany({
+      where: { stage: 'NEEDS_HUMAN_INPUT' },
+      include: { song: { include: { client: true } }, video: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    res.json(jobs);
+  } catch (err) { next(err); }
+});
+
+router.post('/jobs/:id/claim', async (req, res, next) => {
+  try {
+    const job = await prisma.generationJob.update({
+      where: { id: req.params.id },
+      data: { stage: 'HUMAN_IN_PROGRESS', assignedToId: req.body.adminUserId },
+    });
+    res.json(job);
+  } catch (err) { next(err); }
+});
+
+router.post('/jobs/:id/complete', async (req, res, next) => {
+  try {
+    const job = await updateJobStage(req.params.id, 'COMPLETE');
+    res.json(job);
+  } catch (err) { next(err); }
+});
+
+export default router;
+EOF
+
+# ─────────────────────────────────────
+# ROUTES: MARKETPLACE (PUBLIC)
+# ─────────────────────────────────────
+cat > src/routes/marketplace.routes.ts << 'EOF'
+import { Router } from 'express';
+import { prisma } from '../lib/prisma';
+import { broadcastNFTActivity } from '../services/websocket.service';
+
+const router = Router();
+
+router.get('/:slug', async (req, res, next) => {
+  try {
+    const client = await prisma.client.findUniqueOrThrow({
+      where: { slug: req.params.slug },
+      include: {
+        brandProfile: true,
+        songs: {
+          include: { video: true, nftContract: { include: { tiers: true } } },
+        },
+      },
+    });
+    res.json(client);
+  } catch (err) { next(err); }
+});
+
+router.post('/:slug/mint', async (req, res, next) => {
+  try {
+    const { nftTierId, buyerWallet, txHash, amountUsd } = req.body;
+
+    const tier = await prisma.nFTTier.update({
+      where: { id: nftTierId },
+      data: { supplyMinted: { increment: 1 } },
+    });
+
+    const contract = await prisma.nFTContract.findFirstOrThrow({
+      where: { tiers: { some: { id: nftTierId } } },
+    });
+
+    await prisma.revenueTransaction.create({
+      data: {
+        nftTierId,
+        songId: contract.songId,
+        type: 'NFT_PRIMARY_SALE',
+        amountUsd,
+        buyerWallet,
+        txHash,
+      },
+    });
+
+    broadcastNFTActivity(contract.id, tier);
+    res.json({ success: true, tier });
+  } catch (err) { next(err); }
+});
+
+export default router;
+EOF
+
+# ─────────────────────────────────────
+# APP ENTRY POINT
+# ─────────────────────────────────────
+cat > src/app.ts << 'EOF'
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import { createServer } from 'http';
+import { initWebSocket } from './services/websocket.service';
+import { errorHandler } from './middleware/errorHandler';
+
+import clientsRoutes from './routes/clients.routes';
+import songsRoutes from './routes/songs.routes';
+import videosRoutes from './routes/videos.routes';
+import nftRoutes from './routes/nft.routes';
+import valuationRoutes from './routes/valuation.routes';
+import businessPlanRoutes from './routes/businessPlan.routes';
+import dashboardRoutes from './routes/dashboard.routes';
+import adminRoutes from './routes/admin.routes';
+import marketplaceRoutes from './routes/marketplace.routes';
+
+const app = express();
+const httpServer = createServer(app);
+
+app.use(cors());
+app.use(express.json());
+
+app.get('/api/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date() }));
+
+app.use('/api/clients', clientsRoutes);
+app.use('/api/songs', songsRoutes);
+app.use('/api/videos', videosRoutes);
+app.use('/api/nft', nftRoutes);
+app.use('/api/valuation', valuationRoutes);
+app.use('/api/business-plans', businessPlanRoutes);
+app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/public', marketplaceRoutes);
+
+app.use(errorHandler);
+
+initWebSocket(httpServer);
+
+const PORT = process.env.PORT || 4000;
+httpServer.listen(PORT, () => console.log(`Polsia API running on port ${PORT}`));
+EOF
+
+# ─────────────────────────────────────
+# DOCKERFILE
+# ─────────────────────────────────────
+cat > Dockerfile << 'EOF'
+FROM node:20-slim
+RUN apt-get update -y && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY prisma ./prisma
+RUN npx prisma generate
+COPY . .
+RUN npm run build
+EXPOSE 4000
+CMD ["npm", "start"]
+EOF
+
+echo "✅ polsia-api generated."
+echo ""
+echo "Next steps:"
+echo "  1. Ensure PostgreSQL is running: sudo service postgresql start"
+echo "  2. cd polsia-api"
+echo "  3. npm install"
+echo "  4. npx prisma generate"
+echo "  5. npx prisma migrate dev --name init"
+echo "  6. npm run dev"
+echo "  7. Test: curl http://localhost:4000/api/health"
+ENDOFSCRIPT
+
+echo "Script saved. Now run:"
+echo "  bash setup_api.sh"
