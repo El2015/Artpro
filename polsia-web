@@ -1,0 +1,1087 @@
+cd ~/projects/polsia
+cat > setup_web.sh << 'ENDOFSCRIPT'
+#!/bin/bash
+set -e
+
+echo "Creating polsia-web project..."
+npx create-next-app@latest polsia-web \
+  --typescript \
+  --tailwind \
+  --app \
+  --eslint \
+  --no-src-dir \
+  --import-alias "@/*" \
+  --use-npm \
+  --no-turbopack
+
+cd polsia-web
+
+# ─────────────────────────────────────
+# ADDITIONAL DEPS
+# ─────────────────────────────────────
+npm install socket.io-client recharts lucide-react canvas-confetti clsx @tanstack/react-query axios
+npm install -D @types/canvas-confetti
+
+# ─────────────────────────────────────
+# ENV
+# ─────────────────────────────────────
+cat > .env.local << 'EOF'
+NEXT_PUBLIC_API_URL=http://localhost:4000/api
+NEXT_PUBLIC_WS_URL=http://localhost:4000
+EOF
+
+# ─────────────────────────────────────
+# TAILWIND CONFIG (custom tokens)
+# ─────────────────────────────────────
+cat > tailwind.config.ts << 'EOF'
+import type { Config } from "tailwindcss";
+
+const config: Config = {
+  darkMode: "class",
+  content: ["./app/**/*.{ts,tsx}", "./components/**/*.{ts,tsx}", "./lib/**/*.{ts,tsx}", "./hooks/**/*.{ts,tsx}"],
+  theme: {
+    extend: {
+      colors: {
+        primary: "#6C4DFF",
+        secondary: "#00E5A0",
+        accent: "#FF4D6D",
+        neutral: { 900: "#0B0B0F", 700: "#1A1A22", 500: "#2A2A35", 400: "#8A8A99" },
+        paper: "#F5F5FA",
+        status: { draft: "#8A8A99", generating: "#6C4DFF", review: "#FFB84D", approved: "#00E5A0", live: "#00C2FF", alert: "#FF4D6D" },
+      },
+      fontFamily: { display: ["Inter", "sans-serif"], body: ["Inter", "sans-serif"], mono: ["monospace"] },
+      borderRadius: { pill: "14px", card: "16px" },
+      keyframes: {
+        pulse_dot: { "0%, 100%": { opacity: "1" }, "50%": { opacity: "0.4" } },
+        shimmer: { "0%": { backgroundPosition: "-200% 0" }, "100%": { backgroundPosition: "200% 0" } },
+      },
+      animation: { pulse_dot: "pulse_dot 1.2s ease-in-out infinite", shimmer: "shimmer 1.5s linear infinite" },
+    },
+  },
+  plugins: [],
+};
+export default config;
+EOF
+
+# ─────────────────────────────────────
+# GLOBAL CSS
+# ─────────────────────────────────────
+cat > app/globals.css << 'EOF'
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #0B0B0F;
+  color: #F5F5FA;
+  font-family: Inter, sans-serif;
+}
+EOF
+
+# ─────────────────────────────────────
+# DIRECTORIES
+# ─────────────────────────────────────
+mkdir -p lib hooks types
+mkdir -p components/ui components/studio components/masterplan components/dashboard
+mkdir -p app/onboarding/profile app/onboarding/brand-goal
+mkdir -p app/studio/song/\[id\] app/studio/video/\[id\]
+mkdir -p app/bundle-builder/\[songId\]
+mkdir -p app/master-plan/\[planId\]/profile app/master-plan/\[planId\]/product-config
+mkdir -p app/master-plan/\[planId\]/valuation app/master-plan/\[planId\]/financials
+mkdir -p app/master-plan/\[planId\]/deploy
+mkdir -p app/dashboard/\[clientId\]/catalog app/dashboard/\[clientId\]/revenue
+mkdir -p app/dashboard/\[clientId\]/nft app/dashboard/\[clientId\]/marketing
+mkdir -p app/dashboard/\[clientId\]/valuation
+mkdir -p app/admin/review-queue
+mkdir -p app/\[slug\]
+
+# ─────────────────────────────────────
+# TYPES
+# ─────────────────────────────────────
+cat > types/index.ts << 'EOF'
+export type AssetStatus = "DRAFT" | "GENERATING" | "HUMAN_REVIEW" | "APPROVED" | "PUBLISHED";
+export type PipelineMode = "AI_DRAFT" | "HYBRID" | "STUDIO_PRODUCED";
+export type JobStage = "QUEUED" | "PROCESSING" | "NEEDS_HUMAN_INPUT" | "HUMAN_IN_PROGRESS" | "COMPLETE" | "FAILED";
+export type ConfidenceLevel = "LOW" | "MEDIUM" | "HIGH";
+export type TierName = "COLLECTOR" | "SUPERFAN" | "INVESTOR";
+export type ScenarioType = "CONSERVATIVE" | "MODERATE" | "VIRAL" | "BREAKOUT";
+
+export interface Song {
+  id: string; clientId: string; title: string; lyricsInput?: string;
+  moodValue: number; tempoBpm?: number; musicalKey?: string;
+  audioOutputUrl?: string; pipelineMode: PipelineMode; status: AssetStatus;
+}
+
+export interface GenerationJob {
+  id: string; songId?: string; videoId?: string;
+  jobType: string; stage: JobStage; etaEstimate?: string;
+}
+
+export interface FactorBreakdown {
+  audience_reach: { weight: number; score: number };
+  comparable_sales: { weight: number; score: number };
+  royalty_npv: { weight: number; score: number };
+  licensing: { weight: number; score: number };
+  scarcity: { weight: number; score: number };
+}
+
+export interface Valuation {
+  id: string; songId: string; pointEstimate: number;
+  rangeLow: number; rangeHigh: number;
+  confidenceLevel: ConfidenceLevel; factorBreakdown: FactorBreakdown;
+  calculatedAt: string;
+}
+
+export interface ScenarioModel {
+  id: string; scenarioType: ScenarioType;
+  reachLow: number; reachHigh: number; sellThroughPct: number;
+  revLow: number; revHigh: number; probability: number;
+}
+
+export interface NFTTier {
+  id: string; tierName: TierName; supplyTotal: number;
+  supplyMinted: number; priceUsd: number; unlockPerks: string[];
+}
+
+export interface NFTContract {
+  id: string; chain: string; contractAddress?: string;
+  deployStatus: "DRAFT" | "TESTNET" | "MAINNET";
+  royaltyBps: number; tiers: NFTTier[];
+}
+EOF
+
+# ─────────────────────────────────────
+# API CLIENT
+# ─────────────────────────────────────
+cat > lib/api.ts << 'EOF'
+import axios from "axios";
+
+const client = axios.create({
+  baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000/api",
+});
+
+export const api = {
+  health: () => client.get("/health").then(r => r.data),
+  clients: {
+    create: (data: any) => client.post("/clients", data).then(r => r.data),
+    get: (id: string) => client.get(`/clients/${id}`).then(r => r.data),
+  },
+  songs: {
+    create: (data: any) => client.post("/songs", data).then(r => r.data),
+    get: (id: string) => client.get(`/songs/${id}`).then(r => r.data),
+    generate: (id: string, pipelineMode: string) => client.post(`/songs/${id}/generate`, { pipelineMode }).then(r => r.data),
+    getJobs: (id: string) => client.get(`/songs/${id}/jobs`).then(r => r.data),
+    approve: (id: string) => client.post(`/songs/${id}/approve`).then(r => r.data),
+  },
+  videos: {
+    create: (data: any) => client.post("/videos", data).then(r => r.data),
+    generate: (id: string) => client.post(`/videos/${id}/generate`).then(r => r.data),
+  },
+  valuation: {
+    get: (songId: string) => client.get(`/valuation/${songId}`).then(r => r.data),
+    history: (songId: string) => client.get(`/valuation/${songId}/history`).then(r => r.data),
+    recalculate: (songId: string) => client.post(`/valuation/${songId}/recalculate`).then(r => r.data),
+  },
+  nft: {
+    configure: (data: any) => client.post("/nft/configure", data).then(r => r.data),
+    get: (songId: string) => client.get(`/nft/${songId}`).then(r => r.data),
+    deploy: (songId: string, network: string) => client.post("/nft/deploy", { songId, network }).then(r => r.data),
+  },
+  businessPlan: {
+    create: (data: any) => client.post("/business-plans", data).then(r => r.data),
+    methodology: (planId: string) => client.get(`/business-plans/${planId}/methodology`).then(r => r.data),
+    scenarios: (planId: string) => client.get(`/business-plans/${planId}/scenarios`).then(r => r.data),
+    finalize: (planId: string) => client.post(`/business-plans/${planId}/finalize`).then(r => r.data),
+    checklist: (planId: string) => client.get(`/business-plans/${planId}/checklist`).then(r => r.data),
+  },
+  dashboard: {
+    overview: (clientId: string) => client.get(`/dashboard/${clientId}/overview`).then(r => r.data),
+    revenue: (clientId: string) => client.get(`/dashboard/${clientId}/revenue`).then(r => r.data),
+  },
+  admin: {
+    reviewQueue: () => client.get("/admin/review-queue").then(r => r.data),
+    claimJob: (id: string, adminUserId: string) => client.post(`/admin/jobs/${id}/claim`, { adminUserId }).then(r => r.data),
+    completeJob: (id: string) => client.post(`/admin/jobs/${id}/complete`).then(r => r.data),
+  },
+  marketplace: {
+    getStorefront: (slug: string) => client.get(`/public/${slug}`).then(r => r.data),
+    mint: (slug: string, data: any) => client.post(`/public/${slug}/mint`, data).then(r => r.data),
+  },
+};
+EOF
+
+# ─────────────────────────────────────
+# SOCKET
+# ─────────────────────────────────────
+cat > lib/socket.ts << 'EOF'
+import { io, Socket } from "socket.io-client";
+let socket: Socket | null = null;
+export function getSocket(): Socket {
+  if (!socket) socket = io(process.env.NEXT_PUBLIC_WS_URL || "http://localhost:4000");
+  return socket;
+}
+EOF
+
+# ─────────────────────────────────────
+# HOOKS
+# ─────────────────────────────────────
+cat > hooks/useJobStatus.ts << 'EOF'
+"use client";
+import { useEffect, useState } from "react";
+import { getSocket } from "@/lib/socket";
+import type { JobStage } from "@/types";
+
+export function useJobStatus(jobId: string | undefined, initial: JobStage = "QUEUED") {
+  const [stage, setStage] = useState<JobStage>(initial);
+  useEffect(() => {
+    if (!jobId) return;
+    const s = getSocket();
+    s.emit("subscribe:job", jobId);
+    const handler = (p: { jobId: string; stage: JobStage }) => { if (p.jobId === jobId) setStage(p.stage); };
+    s.on("job:update", handler);
+    return () => { s.off("job:update", handler); };
+  }, [jobId]);
+  return { stage };
+}
+EOF
+
+cat > hooks/useNftActivity.ts << 'EOF'
+"use client";
+import { useEffect, useState } from "react";
+import { getSocket } from "@/lib/socket";
+import type { NFTTier } from "@/types";
+
+export function useNftActivity(contractId: string, initial: NFTTier[]) {
+  const [tiers, setTiers] = useState<NFTTier[]>(initial);
+  useEffect(() => {
+    const s = getSocket();
+    s.emit("subscribe:nft", contractId);
+    const handler = (t: NFTTier) => setTiers(prev => prev.map(p => p.id === t.id ? t : p));
+    s.on("nft:tier_sold", handler);
+    return () => { s.off("nft:tier_sold", handler); };
+  }, [contractId]);
+  return tiers;
+}
+EOF
+
+# ─────────────────────────────────────
+# COMPONENTS: UI
+# ─────────────────────────────────────
+cat > components/ui/StatusChip.tsx << 'EOF'
+import clsx from "clsx";
+
+const MAP: Record<string, { label: string; color: string; bg: string; pulse?: boolean }> = {
+  DRAFT: { label: "Draft", color: "text-neutral-400", bg: "bg-neutral-500" },
+  QUEUED: { label: "Queued", color: "text-neutral-400", bg: "bg-neutral-500" },
+  GENERATING: { label: "Generating", color: "text-primary", bg: "bg-primary/15", pulse: true },
+  PROCESSING: { label: "Processing", color: "text-primary", bg: "bg-primary/15", pulse: true },
+  HUMAN_REVIEW: { label: "Human Review", color: "text-status-review", bg: "bg-status-review/15" },
+  NEEDS_HUMAN_INPUT: { label: "Human Review", color: "text-status-review", bg: "bg-status-review/15" },
+  HUMAN_IN_PROGRESS: { label: "In Progress", color: "text-status-review", bg: "bg-status-review/15" },
+  APPROVED: { label: "Approved", color: "text-secondary", bg: "bg-secondary/15" },
+  COMPLETE: { label: "Complete", color: "text-secondary", bg: "bg-secondary/15" },
+  PUBLISHED: { label: "Live", color: "text-status-live", bg: "bg-status-live/15" },
+  FAILED: { label: "Failed", color: "text-accent", bg: "bg-accent/15" },
+};
+
+export function StatusChip({ status }: { status: string }) {
+  const c = MAP[status] ?? MAP.DRAFT;
+  return (
+    <span className={clsx("inline-flex items-center gap-1.5 h-7 px-3 rounded-full text-xs font-semibold", c.bg, c.color)}>
+      <span className={clsx("w-2 h-2 rounded-full", c.color.replace("text-", "bg-"), c.pulse && "animate-pulse_dot")} />
+      {c.label}
+    </span>
+  );
+}
+EOF
+
+cat > components/ui/PipelineBadge.tsx << 'EOF'
+import { Sparkles, Mic, CheckCircle2 } from "lucide-react";
+import type { PipelineMode } from "@/types";
+
+const MAP: Record<PipelineMode, { label: string; icon: React.ReactNode; cls: string }> = {
+  AI_DRAFT: { label: "AI Draft", icon: <Sparkles size={12} />, cls: "text-primary border-primary/40" },
+  HYBRID: { label: "AI + Human", icon: <CheckCircle2 size={12} />, cls: "text-status-live border-status-live/40" },
+  STUDIO_PRODUCED: { label: "Studio Produced", icon: <Mic size={12} />, cls: "text-secondary border-secondary/40" },
+};
+
+export function PipelineBadge({ mode }: { mode: PipelineMode }) {
+  const c = MAP[mode];
+  return <span className={`inline-flex items-center gap-1 h-6 px-2.5 rounded-md text-[11px] font-medium border ${c.cls}`}>{c.icon}{c.label}</span>;
+}
+EOF
+
+cat > components/ui/ConfidenceBar.tsx << 'EOF'
+import clsx from "clsx";
+import type { ConfidenceLevel } from "@/types";
+
+const FILL: Record<ConfidenceLevel, number> = { LOW: 2, MEDIUM: 4, HIGH: 6 };
+const COLOR: Record<ConfidenceLevel, string> = { LOW: "bg-accent", MEDIUM: "bg-status-review", HIGH: "bg-secondary" };
+const LABEL: Record<ConfidenceLevel, string> = { LOW: "Low", MEDIUM: "Medium", HIGH: "High" };
+
+export function ConfidenceBar({ level }: { level: ConfidenceLevel }) {
+  return (
+    <div className="inline-flex items-center gap-2">
+      <div className="flex gap-0.5">{Array.from({ length: 6 }).map((_, i) => (
+        <span key={i} className={clsx("w-2 h-1.5 rounded-sm", i < FILL[level] ? COLOR[level] : "bg-neutral-500")} />
+      ))}</div>
+      <span className="text-xs text-neutral-400">{LABEL[level]} confidence</span>
+    </div>
+  );
+}
+EOF
+
+cat > components/ui/ProgressQueueWidget.tsx << 'EOF'
+import { CheckCircle2, Loader2, Circle } from "lucide-react";
+import clsx from "clsx";
+import type { JobStage } from "@/types";
+
+interface Item { label: string; stage: JobStage; eta?: string; }
+
+const ICON: Record<string, React.ReactNode> = {
+  COMPLETE: <CheckCircle2 size={16} className="text-secondary" />,
+  QUEUED: <Circle size={16} className="text-neutral-400" />,
+  PROCESSING: <Loader2 size={16} className="text-primary animate-spin" />,
+  NEEDS_HUMAN_INPUT: <Loader2 size={16} className="text-status-review animate-spin" />,
+  HUMAN_IN_PROGRESS: <Loader2 size={16} className="text-status-review animate-spin" />,
+  FAILED: <Circle size={16} className="text-accent" />,
+};
+
+export function ProgressQueueWidget({ items }: { items: Item[] }) {
+  return (
+    <div className="space-y-2">{items.map((item, i) => (
+      <div key={i} className={clsx("flex items-center justify-between h-8 px-2 rounded-md", item.stage === "COMPLETE" && "bg-secondary/10")}>
+        <div className="flex items-center gap-2 text-sm">{ICON[item.stage] || ICON.QUEUED}{item.label}</div>
+        {item.eta && item.stage !== "COMPLETE" && <span className="text-xs text-neutral-400">ETA: {item.eta}</span>}
+      </div>
+    ))}</div>
+  );
+}
+EOF
+
+cat > components/ui/ValuationCard.tsx << 'EOF'
+"use client";
+import { useState } from "react";
+import { ChevronRight } from "lucide-react";
+import { ConfidenceBar } from "./ConfidenceBar";
+import type { Valuation } from "@/types";
+
+const LABELS: Record<string, { title: string; desc: string }> = {
+  audience_reach: { title: "Audience Reach Potential", desc: "Current reach x genre trend momentum x platform favorability" },
+  comparable_sales: { title: "Comparable Market Sales", desc: "Recency-weighted avg of similar NFT sales, last 90 days" },
+  royalty_npv: { title: "Streaming Royalty Forecast", desc: "5-year NPV of projected streams x per-stream rate x royalty %" },
+  licensing: { title: "Licensing/Sync Potential", desc: "Scored against sync-licensing demand database" },
+  scarcity: { title: "NFT Scarcity Premium", desc: "Based on chosen supply curve and tier distribution" },
+};
+
+export function ValuationCard({ valuation }: { valuation: Valuation }) {
+  const [open, setOpen] = useState(false);
+  const pct = valuation.rangeHigh > valuation.rangeLow
+    ? ((valuation.pointEstimate - valuation.rangeLow) / (valuation.rangeHigh - valuation.rangeLow)) * 100 : 50;
+
+  return (
+    <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4">
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="text-sm text-neutral-400">Current Valuation</p>
+          <p className="text-2xl font-bold">${valuation.pointEstimate.toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+        </div>
+        <ConfidenceBar level={valuation.confidenceLevel} />
+      </div>
+      <button onClick={() => setOpen(!open)} className="mt-3 text-xs text-primary flex items-center gap-1 hover:underline">
+        {open ? "Hide" : "See Full"} Methodology <ChevronRight size={12} className={open ? "rotate-90 transition-transform" : "transition-transform"} />
+      </button>
+      {open && (
+        <div className="mt-4 space-y-3 border-t border-neutral-500 pt-4">
+          {Object.entries(valuation.factorBreakdown).map(([key, f]) => (
+            <div key={key}>
+              <div className="flex justify-between text-sm"><span className="font-medium">{LABELS[key]?.title}</span><span className="text-neutral-400">{(f.weight * 100).toFixed(0)}%</span></div>
+              <p className="text-xs text-neutral-400 mt-0.5">{LABELS[key]?.desc}</p>
+            </div>
+          ))}
+          <div className="pt-2 flex items-center gap-3">
+            <span className="text-xs text-neutral-400">${valuation.rangeLow.toLocaleString()}</span>
+            <div className="flex-1 h-1.5 bg-neutral-500 rounded-full relative">
+              <div className="absolute w-2 h-2 bg-primary rounded-full -top-0.5" style={{ left: `${Math.min(pct, 100)}%` }} />
+            </div>
+            <span className="text-xs text-neutral-400">${valuation.rangeHigh.toLocaleString()}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+EOF
+
+cat > components/ui/TierSelector.tsx << 'EOF'
+"use client";
+import clsx from "clsx";
+import { Check } from "lucide-react";
+
+interface Tier { id: string; name: string; description: string; price: string; recommended?: boolean; }
+
+export function TierSelector({ tiers, selectedId, onSelect }: { tiers: Tier[]; selectedId: string | null; onSelect: (id: string) => void }) {
+  return (
+    <div className="flex flex-col md:flex-row gap-4">
+      {tiers.map(t => {
+        const sel = selectedId === t.id;
+        return (
+          <div key={t.id} onClick={() => onSelect(t.id)}
+            className={clsx("relative flex-1 min-w-[220px] p-6 rounded-[16px] border-2 cursor-pointer transition-all hover:-translate-y-0.5",
+              sel ? "border-secondary bg-neutral-700" : t.recommended ? "border-primary bg-neutral-700 shadow-[0_0_24px_rgba(108,77,255,0.3)]" : "border-neutral-500 bg-neutral-700")}>
+            {t.recommended && !sel && <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-primary text-white text-[10px] font-bold px-3 py-1 rounded-full">★ RECOMMENDED</span>}
+            {sel && <Check size={18} className="absolute top-4 right-4 text-secondary" />}
+            <h3 className="font-bold text-lg">{t.name}</h3>
+            <p className="text-sm text-neutral-400 mt-1">{t.description}</p>
+            <p className="text-2xl font-bold mt-4">{t.price}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+EOF
+
+cat > components/ui/NFTContractCard.tsx << 'EOF'
+import { Copy, ExternalLink } from "lucide-react";
+import type { NFTContract } from "@/types";
+
+const COLOR: Record<string, string> = { DRAFT: "bg-neutral-400", TESTNET: "bg-status-review", MAINNET: "bg-status-live" };
+
+export function NFTContractCard({ contract }: { contract: NFTContract }) {
+  return (
+    <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4 space-y-2">
+      <div className="flex items-center gap-2"><span className={`w-2 h-2 rounded-full ${COLOR[contract.deployStatus]}`} /><span className="text-sm font-medium">{contract.deployStatus}</span></div>
+      <div className="flex justify-between text-sm"><span className="text-neutral-400">Chain</span><span>{contract.chain}</span></div>
+      {contract.contractAddress && (
+        <div className="flex justify-between text-sm"><span className="text-neutral-400">Address</span>
+          <span className="font-mono text-xs">{contract.contractAddress.slice(0, 6)}...{contract.contractAddress.slice(-4)} <Copy size={10} className="inline ml-1" /></span>
+        </div>
+      )}
+      <div className="flex justify-between text-sm"><span className="text-neutral-400">Royalty</span><span>{contract.royaltyBps / 100}%</span></div>
+      {contract.contractAddress && <a className="flex items-center gap-1 text-xs text-primary pt-1" href="#">View on Explorer <ExternalLink size={12} /></a>}
+    </div>
+  );
+}
+EOF
+
+cat > components/ui/DisclaimerBanner.tsx << 'EOF'
+import { AlertTriangle } from "lucide-react";
+import clsx from "clsx";
+
+type DType = "valuation" | "securities" | "crypto_risk" | "ai_content" | "projection" | "likeness";
+
+const TEXT: Record<DType, { title: string; body: string; warn: boolean }> = {
+  valuation: { title: "Valuation Disclaimer", body: "This is a statistical estimate, not a guarantee. Not financial advice.", warn: false },
+  securities: { title: "Investor Tier Notice", body: "Revenue-share arrangements may be treated as securities in some jurisdictions. Consult a securities attorney.", warn: true },
+  crypto_risk: { title: "Digital Asset Risk", body: "NFT/crypto transactions are irreversible and carry risk of total loss.", warn: true },
+  ai_content: { title: "AI Content Disclosure", body: "This asset was created using AI. Copyright eligibility varies by jurisdiction.", warn: false },
+  projection: { title: "Not a Guarantee", body: "Scenarios are modeled possibilities, not predictions. Most assets perform near the conservative case.", warn: true },
+  likeness: { title: "Voice & Likeness Consent", body: "By uploading, you confirm you own these rights or have explicit permission.", warn: false },
+};
+
+export function DisclaimerBanner({ type }: { type: DType }) {
+  const c = TEXT[type];
+  return (
+    <div className={clsx("rounded-md border p-3 flex gap-2 text-xs", c.warn ? "bg-accent/10 border-accent/30 text-accent" : "bg-neutral-500/20 border-neutral-500 text-neutral-400")}>
+      <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+      <div><p className="font-semibold mb-0.5">{c.title}</p><p>{c.body}</p></div>
+    </div>
+  );
+}
+EOF
+
+cat > components/ui/LegalFooter.tsx << 'EOF'
+export function LegalFooter() {
+  return (
+    <footer className="border-t border-neutral-500 mt-12 py-6 text-xs text-neutral-400 flex flex-wrap gap-4 justify-center">
+      <a href="/terms">Terms</a><a href="/privacy">Privacy</a><a href="/risk-disclosure">Risk Disclosure</a>
+      <span>© {new Date().getFullYear()} Polsia.com — Not financial, legal, or investment advice.</span>
+    </footer>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# DASHBOARD COMPONENTS
+# ─────────────────────────────────────
+cat > components/dashboard/KpiCard.tsx << 'EOF'
+export function KpiCard({ label, value, delta }: { label: string; value: string; delta?: string }) {
+  return (
+    <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4">
+      <p className="text-sm text-neutral-400">{label}</p>
+      <p className="text-2xl font-bold mt-1">{value}</p>
+      {delta && <p className="text-xs text-secondary mt-1">▲ {delta}</p>}
+    </div>
+  );
+}
+EOF
+
+cat > components/dashboard/TrendChart.tsx << 'EOF'
+"use client";
+import { LineChart, Line, ResponsiveContainer, XAxis, YAxis, Tooltip } from "recharts";
+
+export function TrendChart({ data, dataKey }: { data: any[]; dataKey: string }) {
+  if (!data.length) return <div className="h-40 flex items-center justify-center text-neutral-400 text-sm">No data yet</div>;
+  return (
+    <ResponsiveContainer width="100%" height={160}>
+      <LineChart data={data}>
+        <XAxis dataKey="date" hide /><YAxis hide />
+        <Tooltip contentStyle={{ background: "#1A1A22", border: "1px solid #2A2A35", color: "#F5F5FA" }} />
+        <Line type="monotone" dataKey={dataKey} stroke="#6C4DFF" strokeWidth={2} dot={false} />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# MASTERPLAN COMPONENTS
+# ─────────────────────────────────────
+cat > components/masterplan/WizardStepNav.tsx << 'EOF'
+"use client";
+import { usePathname, useRouter } from "next/navigation";
+import clsx from "clsx";
+
+const STEPS = [
+  { key: "profile", label: "Profile" }, { key: "product-config", label: "Product Config" },
+  { key: "valuation", label: "Valuation" }, { key: "financials", label: "Financials" },
+  { key: "deploy", label: "Deploy" },
+];
+
+export function WizardStepNav({ planId }: { planId: string }) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const current = pathname.split("/").pop();
+
+  return (
+    <div className="flex items-center gap-2 mb-8 flex-wrap">
+      {STEPS.map((step, i) => {
+        const active = step.key === current;
+        const past = STEPS.findIndex(s => s.key === current) > i;
+        return (
+          <div key={step.key} className="flex items-center gap-2">
+            <button onClick={() => router.push(`/master-plan/${planId}/${step.key}`)}
+              className={clsx("w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold",
+                active && "bg-primary text-white", past && !active && "bg-secondary text-neutral-900",
+                !active && !past && "bg-neutral-500 text-neutral-400")}>
+              {i + 1}
+            </button>
+            <span className={clsx("text-xs", active ? "text-paper" : "text-neutral-400")}>{step.label}</span>
+            {i < STEPS.length - 1 && <div className="w-6 h-px bg-neutral-500" />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+EOF
+
+cat > components/masterplan/ScenarioTable.tsx << 'EOF'
+import type { ScenarioModel } from "@/types";
+
+const LABEL: Record<string, string> = { CONSERVATIVE: "Conservative", MODERATE: "Moderate", VIRAL: "Viral", BREAKOUT: "Breakout" };
+
+export function ScenarioTable({ scenarios, expectedValue }: { scenarios: ScenarioModel[]; expectedValue: number }) {
+  return (
+    <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4">
+      <h3 className="text-sm font-semibold mb-3">Potential Outcome Scenarios</h3>
+      <table className="w-full text-sm">
+        <thead><tr className="text-neutral-400 text-left">
+          <th className="pb-2 font-normal">Scenario</th><th className="pb-2 font-normal">Reach</th>
+          <th className="pb-2 font-normal">Sell%</th><th className="pb-2 font-normal">Revenue</th>
+          <th className="pb-2 font-normal">Odds</th>
+        </tr></thead>
+        <tbody>{scenarios.map(s => (
+          <tr key={s.id} className="border-t border-neutral-500">
+            <td className="py-2">{LABEL[s.scenarioType]}</td>
+            <td className="py-2 text-neutral-400">{s.reachLow.toLocaleString()}-{s.reachHigh.toLocaleString()}</td>
+            <td className="py-2 text-neutral-400">{(s.sellThroughPct * 100).toFixed(0)}%</td>
+            <td className="py-2 text-neutral-400">${s.revLow.toLocaleString()}-${s.revHigh.toLocaleString()}</td>
+            <td className="py-2 text-neutral-400">{(s.probability * 100).toFixed(0)}%</td>
+          </tr>
+        ))}</tbody>
+      </table>
+      <div className="mt-4 pt-4 border-t border-neutral-500 flex justify-between items-center">
+        <span className="text-sm text-neutral-400">Expected Value</span>
+        <span className="text-xl font-bold text-secondary">${expectedValue.toLocaleString()}</span>
+      </div>
+    </div>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# ROOT LAYOUT
+# ─────────────────────────────────────
+cat > app/layout.tsx << 'EOF'
+import type { Metadata } from "next";
+import "./globals.css";
+import { LegalFooter } from "@/components/ui/LegalFooter";
+
+export const metadata: Metadata = { title: "Polsia.com", description: "AI-Powered Creative-to-Commerce Platform" };
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en" className="dark">
+      <body className="min-h-screen flex flex-col">
+        <main className="flex-1">{children}</main>
+        <LegalFooter />
+      </body>
+    </html>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# LANDING PAGE
+# ─────────────────────────────────────
+cat > app/page.tsx << 'EOF'
+import Link from "next/link";
+
+export default function Home() {
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-center p-8 text-center">
+      <h1 className="text-5xl font-bold mb-4 bg-gradient-to-r from-primary to-secondary bg-clip-text text-transparent">Polsia.com</h1>
+      <p className="text-xl text-neutral-400 mb-8 max-w-lg">AI-Powered Creative-to-Commerce Platform. From song to business in one interface.</p>
+      <div className="flex gap-4">
+        <Link href="/onboarding/profile" className="bg-primary text-white px-6 py-3 rounded-md font-medium hover:bg-primary/90">Get Started</Link>
+        <Link href="/dashboard/demo" className="border border-neutral-500 px-6 py-3 rounded-md font-medium hover:bg-neutral-700">View Demo Dashboard</Link>
+      </div>
+    </div>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# ONBOARDING
+# ─────────────────────────────────────
+cat > app/onboarding/profile/page.tsx << 'EOF'
+"use client";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { api } from "@/lib/api";
+import { DisclaimerBanner } from "@/components/ui/DisclaimerBanner";
+
+export default function ProfilePage() {
+  const router = useRouter();
+  const [name, setName] = useState("");
+  const [slug, setSlug] = useState("");
+
+  const handleContinue = async () => {
+    const client = await api.clients.create({ artistName: name, slug: slug || name.toLowerCase().replace(/\s+/g, "-"), businessGoal: "SINGLE_RELEASE", budgetTier: "GROWTH" });
+    localStorage.setItem("polsia_client_id", client.id);
+    router.push("/onboarding/brand-goal");
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-8">
+      <div className="w-full max-w-md space-y-6">
+        <div><p className="text-xs text-neutral-400 mb-1">Step 1 of 2</p><h1 className="text-xl font-bold">Build your sonic identity</h1></div>
+        <div><label className="text-sm text-neutral-400">Artist / Project Name</label><input value={name} onChange={e => setName(e.target.value)} className="w-full mt-1 bg-neutral-700 border border-neutral-500 rounded-md p-3 text-sm" /></div>
+        <div><label className="text-sm text-neutral-400">URL Slug (polsia.com/your-slug)</label><input value={slug} onChange={e => setSlug(e.target.value)} placeholder={name.toLowerCase().replace(/\s+/g, "-")} className="w-full mt-1 bg-neutral-700 border border-neutral-500 rounded-md p-3 text-sm" /></div>
+        <DisclaimerBanner type="likeness" />
+        <button onClick={handleContinue} disabled={!name} className="w-full bg-primary text-white rounded-md py-3 font-medium disabled:opacity-40">Continue →</button>
+      </div>
+    </div>
+  );
+}
+EOF
+
+cat > app/onboarding/brand-goal/page.tsx << 'EOF'
+"use client";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { TierSelector } from "@/components/ui/TierSelector";
+
+const GOALS = [
+  { id: "SINGLE_RELEASE", name: "🎵 Single Release", description: "One song + NFT", price: "Quick" },
+  { id: "CATALOG_BUILD", name: "📀 Catalog Build", description: "Ongoing content", price: "Steady", recommended: true },
+  { id: "FULL_SUITE", name: "🚀 Full Suite", description: "Song+Video+NFT+Marketing", price: "Complete" },
+];
+
+export default function BrandGoalPage() {
+  const [selected, setSelected] = useState("CATALOG_BUILD");
+  const router = useRouter();
+  const clientId = typeof window !== "undefined" ? localStorage.getItem("polsia_client_id") : null;
+
+  return (
+    <div className="min-h-screen flex items-center justify-center p-8">
+      <div className="w-full max-w-3xl space-y-6">
+        <div><p className="text-xs text-neutral-400 mb-1">Step 2 of 2</p><h1 className="text-xl font-bold">What is your primary goal?</h1></div>
+        <TierSelector tiers={GOALS} selectedId={selected} onSelect={setSelected} />
+        <button onClick={() => router.push(`/dashboard/${clientId}`)} className="w-full bg-primary text-white rounded-md py-3 font-medium">Launch Dashboard →</button>
+      </div>
+    </div>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# DASHBOARD LAYOUT + TABS
+# ─────────────────────────────────────
+cat > 'app/dashboard/[clientId]/layout.tsx' << 'EOF'
+"use client";
+import { usePathname, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
+import clsx from "clsx";
+
+const TABS = [
+  { key: "", label: "Overview" }, { key: "catalog", label: "Catalog" },
+  { key: "revenue", label: "Revenue" }, { key: "nft", label: "NFT" },
+  { key: "marketing", label: "Marketing" }, { key: "valuation", label: "Valuation" },
+];
+
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const router = useRouter();
+  const params = useParams();
+  const clientId = params.clientId as string;
+  const segments = pathname.split("/");
+  const activeTab = segments.length > 3 ? segments[segments.length - 1] : "";
+
+  return (
+    <div className="min-h-screen p-8 max-w-6xl mx-auto">
+      <h1 className="text-2xl font-bold mb-6">Dashboard</h1>
+      <div className="flex gap-1 border-b border-neutral-500 mb-6">
+        {TABS.map(tab => (
+          <button key={tab.key} onClick={() => router.push(`/dashboard/${clientId}/${tab.key}`)}
+            className={clsx("px-4 py-2.5 text-sm border-b-2 -mb-px", activeTab === tab.key ? "border-primary text-paper" : "border-transparent text-neutral-400")}>
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {children}
+    </div>
+  );
+}
+EOF
+
+cat > 'app/dashboard/[clientId]/page.tsx' << 'EOF'
+"use client";
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
+import { api } from "@/lib/api";
+import { KpiCard } from "@/components/dashboard/KpiCard";
+import { TrendChart } from "@/components/dashboard/TrendChart";
+import Link from "next/link";
+
+export default function OverviewTab() {
+  const params = useParams();
+  const clientId = params.clientId as string;
+  const [overview, setOverview] = useState<any>(null);
+
+  useEffect(() => {
+    api.dashboard.overview(clientId).then(setOverview).catch(() => {});
+  }, [clientId]);
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <KpiCard label="Current Value" value={`$${overview?.currentValue?.toLocaleString() ?? "0"}`} />
+        <KpiCard label="Revenue (MTD)" value={`$${overview?.revenueMtd?.toLocaleString() ?? "0"}`} />
+        <KpiCard label="NFTs Sold" value={overview?.nftsSold ?? "0 / 0"} />
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4">
+          <p className="text-sm font-semibold mb-2">Reach Trend (30d)</p>
+          <TrendChart data={overview?.reachTrend ?? []} dataKey="reach" />
+        </div>
+        <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4">
+          <p className="text-sm font-semibold mb-2">Valuation Trend (30d)</p>
+          <TrendChart data={overview?.valuationTrend ?? []} dataKey="value" />
+        </div>
+      </div>
+      <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4">
+        <p className="text-sm font-semibold mb-3">Quick Actions</p>
+        <div className="flex flex-wrap gap-3">
+          <Link href="/studio/song/new" className="text-sm text-primary hover:underline">+ Create Song</Link>
+          <Link href="/admin/review-queue" className="text-sm text-primary hover:underline">Review Queue</Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+EOF
+
+# placeholder tab pages
+for tab in catalog revenue nft marketing valuation; do
+cat > "app/dashboard/[clientId]/$tab/page.tsx" << EOF
+export default function ${tab^}Tab() {
+  return <div className="text-neutral-400 text-sm p-4">$tab tab — coming soon</div>;
+}
+EOF
+done
+
+# ─────────────────────────────────────
+# ADMIN REVIEW QUEUE
+# ─────────────────────────────────────
+cat > app/admin/review-queue/page.tsx << 'EOF'
+"use client";
+import { useEffect, useState } from "react";
+import { api } from "@/lib/api";
+import { StatusChip } from "@/components/ui/StatusChip";
+
+export default function ReviewQueuePage() {
+  const [jobs, setJobs] = useState<any[]>([]);
+  useEffect(() => { api.admin.reviewQueue().then(setJobs).catch(() => {}); }, []);
+
+  return (
+    <div className="min-h-screen p-8 max-w-4xl mx-auto">
+      <h1 className="text-xl font-bold mb-6">Review Queue ({jobs.length} pending)</h1>
+      <table className="w-full text-sm">
+        <thead><tr className="text-neutral-400 text-left border-b border-neutral-500">
+          <th className="pb-2">Client</th><th className="pb-2">Type</th><th className="pb-2">Status</th><th className="pb-2"></th>
+        </tr></thead>
+        <tbody>{jobs.map(j => (
+          <tr key={j.id} className="border-b border-neutral-500">
+            <td className="py-3">{j.song?.client?.artistName ?? "—"}</td>
+            <td className="py-3">{j.jobType}</td>
+            <td className="py-3"><StatusChip status={j.stage} /></td>
+            <td className="py-3"><button onClick={() => api.admin.claimJob(j.id, "admin")} className="text-primary text-xs">Claim</button></td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# MARKETPLACE STOREFRONT
+# ─────────────────────────────────────
+cat > 'app/[slug]/page.tsx' << 'EOF'
+"use client";
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
+import { api } from "@/lib/api";
+import { TierSelector } from "@/components/ui/TierSelector";
+import { DisclaimerBanner } from "@/components/ui/DisclaimerBanner";
+
+export default function StorefrontPage() {
+  const params = useParams();
+  const slug = params.slug as string;
+  const [client, setClient] = useState<any>(null);
+  const [selectedTier, setSelectedTier] = useState<string | null>(null);
+
+  useEffect(() => { api.marketplace.getStorefront(slug).then(setClient).catch(() => {}); }, [slug]);
+
+  if (!client) return <div className="min-h-screen flex items-center justify-center text-neutral-400">Loading...</div>;
+
+  const song = client.songs?.[0];
+  const tiers = song?.nftContract?.tiers?.map((t: any) => ({
+    id: t.id, name: t.tierName,
+    description: `${t.supplyTotal - t.supplyMinted} / ${t.supplyTotal} left`,
+    price: `$${t.priceUsd}`,
+  })) ?? [];
+
+  return (
+    <div className="min-h-screen p-8 max-w-3xl mx-auto space-y-6">
+      <h1 className="text-2xl font-bold">{song?.title ?? "Untitled"} — by {client.artistName}</h1>
+      {tiers.length > 0 && <TierSelector tiers={tiers} selectedId={selectedTier} onSelect={setSelectedTier} />}
+      <DisclaimerBanner type="crypto_risk" />
+      <button disabled={!selectedTier} className="w-full bg-primary text-white rounded-md py-3 font-medium disabled:opacity-40">Mint Selected Tier</button>
+    </div>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# MASTER PLAN LAYOUT + PAGES
+# ─────────────────────────────────────
+cat > 'app/master-plan/[planId]/layout.tsx' << 'EOF'
+import { WizardStepNav } from "@/components/masterplan/WizardStepNav";
+
+export default function MasterPlanLayout({ children, params }: { children: React.ReactNode; params: { planId: string } }) {
+  return (
+    <div className="min-h-screen p-8 max-w-4xl mx-auto">
+      <h1 className="text-2xl font-bold mb-2">Master Business Plan</h1>
+      <p className="text-sm text-neutral-400 mb-6">Auto-populated from your Studio + Bundle selections</p>
+      <WizardStepNav planId={params.planId} />
+      {children}
+    </div>
+  );
+}
+EOF
+
+cat > 'app/master-plan/[planId]/profile/page.tsx' << 'EOF'
+"use client";
+import { useRouter, useParams } from "next/navigation";
+export default function ProfileStep() {
+  const router = useRouter();
+  const params = useParams();
+  return (
+    <div className="space-y-6">
+      <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-6">
+        <h2 className="font-semibold mb-4">Review Client Profile</h2>
+        <p className="text-sm text-neutral-400">Profile data auto-populated from onboarding. Review and continue.</p>
+      </div>
+      <div className="flex justify-end">
+        <button onClick={() => router.push(`/master-plan/${params.planId}/product-config`)} className="bg-primary text-white rounded-md px-5 py-2.5 text-sm font-medium">Continue →</button>
+      </div>
+    </div>
+  );
+}
+EOF
+
+cat > 'app/master-plan/[planId]/product-config/page.tsx' << 'EOF'
+"use client";
+import { useState } from "react";
+import { useRouter, useParams } from "next/navigation";
+import { TierSelector } from "@/components/ui/TierSelector";
+
+const TIERS = [
+  { id: "starter", name: "Starter", description: "Song + NFT", price: "$X" },
+  { id: "growth", name: "Growth", description: "+Video +Marketing", price: "$XX", recommended: true },
+  { id: "enterprise", name: "Enterprise", description: "+Full Suite", price: "$XXX" },
+];
+
+export default function ProductConfigStep() {
+  const [selected, setSelected] = useState("growth");
+  const router = useRouter();
+  const params = useParams();
+  return (
+    <div className="space-y-6">
+      <TierSelector tiers={TIERS} selectedId={selected} onSelect={setSelected} />
+      <div className="flex justify-end">
+        <button onClick={() => router.push(`/master-plan/${params.planId}/valuation`)} className="bg-primary text-white rounded-md px-5 py-2.5 text-sm font-medium">Continue →</button>
+      </div>
+    </div>
+  );
+}
+EOF
+
+cat > 'app/master-plan/[planId]/valuation/page.tsx' << 'EOF'
+"use client";
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { api } from "@/lib/api";
+import { ValuationCard } from "@/components/ui/ValuationCard";
+import { ScenarioTable } from "@/components/masterplan/ScenarioTable";
+import { DisclaimerBanner } from "@/components/ui/DisclaimerBanner";
+import type { Valuation, ScenarioModel } from "@/types";
+
+export default function ValuationStep() {
+  const params = useParams();
+  const router = useRouter();
+  const planId = params.planId as string;
+  const [valuation, setValuation] = useState<Valuation | null>(null);
+  const [scenarios, setScenarios] = useState<ScenarioModel[]>([]);
+  const [ev, setEv] = useState(0);
+
+  useEffect(() => {
+    api.businessPlan.methodology(planId).then(d => {
+      if (d.factorBreakdown) setValuation({
+        id: "", songId: "", pointEstimate: Number(d.pointEstimate), rangeLow: Number(d.range.low),
+        rangeHigh: Number(d.range.high), confidenceLevel: d.confidence, factorBreakdown: d.factorBreakdown, calculatedAt: "",
+      });
+    }).catch(() => {});
+    api.businessPlan.scenarios(planId).then(d => { setScenarios(d.scenarios); setEv(d.expectedValue); }).catch(() => {});
+  }, [planId]);
+
+  return (
+    <div className="space-y-6">
+      <h2 className="text-xl font-bold">How We Value Your Asset</h2>
+      {valuation ? <ValuationCard valuation={valuation} /> : <p className="text-neutral-400 text-sm">No valuation data yet. Create a song first.</p>}
+      {scenarios.length > 0 && <ScenarioTable scenarios={scenarios} expectedValue={ev} />}
+      <DisclaimerBanner type="valuation" />
+      <DisclaimerBanner type="projection" />
+      <div className="flex justify-end">
+        <button onClick={() => router.push(`/master-plan/${planId}/financials`)} className="bg-primary text-white rounded-md px-5 py-2.5 text-sm font-medium">Continue →</button>
+      </div>
+    </div>
+  );
+}
+EOF
+
+cat > 'app/master-plan/[planId]/financials/page.tsx' << 'EOF'
+"use client";
+import { useRouter, useParams } from "next/navigation";
+
+export default function FinancialsStep() {
+  const router = useRouter();
+  const params = useParams();
+  const breakdown = [
+    { label: "Generation compute (hybrid)", value: 450 },
+    { label: "Human producer/editor time", value: 800 },
+    { label: "Marketing spend allocated", value: 1200 },
+  ];
+  const total = breakdown.reduce((s, b) => s + b.value, 0);
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-6 space-y-4">
+        <h2 className="font-semibold">Production Cost Estimate</h2>
+        {breakdown.map(b => <div key={b.label} className="flex justify-between text-sm"><span className="text-neutral-400">{b.label}</span><span>${b.value}</span></div>)}
+        <div className="flex justify-between text-sm font-bold border-t border-neutral-500 pt-3"><span>Total</span><span>${total}</span></div>
+        <div className="pt-4 space-y-2">
+          <h3 className="text-sm font-semibold">Revenue Split</h3>
+          {[{ l: "Artist", p: 70, c: "bg-secondary" }, { l: "Platform", p: 20, c: "bg-primary" }, { l: "Marketing", p: 10, c: "bg-status-review" }].map(r => (
+            <div key={r.l}><div className="flex justify-between text-xs mb-1"><span>{r.l}</span><span>{r.p}%</span></div>
+              <div className="h-2 bg-neutral-500 rounded-full"><div className={`h-2 rounded-full ${r.c}`} style={{ width: `${r.p}%` }} /></div></div>
+          ))}
+        </div>
+        <p className="text-sm text-neutral-400 pt-4 border-t border-neutral-500">Break-even: ~180 units @ $25 avg</p>
+      </div>
+      <div className="flex justify-end">
+        <button onClick={() => router.push(`/master-plan/${params.planId}/deploy`)} className="bg-primary text-white rounded-md px-5 py-2.5 text-sm font-medium">Continue →</button>
+      </div>
+    </div>
+  );
+}
+EOF
+
+cat > 'app/master-plan/[planId]/deploy/page.tsx' << 'EOF'
+"use client";
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
+import { api } from "@/lib/api";
+import { ProgressQueueWidget } from "@/components/ui/ProgressQueueWidget";
+
+export default function DeployStep() {
+  const params = useParams();
+  const planId = params.planId as string;
+  const [checklist, setChecklist] = useState<any>(null);
+
+  useEffect(() => { api.businessPlan.checklist(planId).then(setChecklist).catch(() => {}); }, [planId]);
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-6 space-y-4">
+        <h2 className="font-semibold">Smart Contract & Web3 Setup</h2>
+        <ProgressQueueWidget items={[
+          { label: "Contract authored (OpenZeppelin base)", stage: "COMPLETE" },
+          { label: "Security scan (Slither/MythX)", stage: "COMPLETE" },
+          { label: "Testnet deployment", stage: "QUEUED" },
+          { label: "Mint flow QA", stage: "QUEUED" },
+          { label: "Mainnet deployment (multisig)", stage: "QUEUED" },
+        ]} />
+      </div>
+      <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-6">
+        <h2 className="font-semibold mb-3">Deployment Checklist</h2>
+        <ul className="space-y-2 text-sm">
+          {(checklist?.items ?? []).map((item: any, i: number) => (
+            <li key={i} className="flex items-center gap-2">
+              <span>{item.status === "done" ? "✓" : "○"}</span>{item.label}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <button className="w-full bg-secondary text-neutral-900 rounded-md py-3 font-medium">Finalize & Launch</button>
+    </div>
+  );
+}
+EOF
+
+echo ""
+echo "✅ polsia-web generated."
+echo ""
+echo "Next steps:"
+echo "  cd polsia-web"
+echo "  npm run dev"
+echo "  Open http://localhost:3000 in your browser"
+ENDOFSCRIPT
+
+echo "Script saved. Now run:"
+echo "  cd ~/projects/polsia && bash setup_web.sh"
