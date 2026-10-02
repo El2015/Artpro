@@ -1,0 +1,571 @@
+#!/bin/bash
+# polsia-contracts bootstrap — run once, generates full repo
+set -e
+mkdir -p polsia-contracts/{contracts/interfaces,test,scripts}
+cd polsia-contracts
+
+cat > package.json << 'EOF'
+{
+  "name": "polsia-contracts",
+  "version": "0.1.0",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "coverage": "hardhat coverage"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.0",
+    "chai": "^4.4.1",
+    "dotenv": "^16.4.5",
+    "hardhat": "^2.22.0",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.2"
+  }
+}
+EOF
+
+cat > tsconfig.json << 'EOF'
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "module": "commonjs",
+    "strict": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["./scripts", "./test", "./hardhat.config.ts"]
+}
+EOF
+
+cat > hardhat.config.ts << 'EOF'
+import { HardhatUserConfig } from "hardhat/config";
+import "@nomicfoundation/hardhat-toolbox";
+import "@nomicfoundation/hardhat-verify";
+import * as dotenv from "dotenv";
+dotenv.config();
+
+const config: HardhatUserConfig = {
+  solidity: {
+    version: "0.8.24",
+    settings: { optimizer: { enabled: true, runs: 200 } },
+  },
+  networks: {
+    hardhat: {},
+    polygonAmoy: {
+      url: process.env.POLYGON_AMOY_RPC || "",
+      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
+    },
+    polygon: {
+      url: process.env.POLYGON_RPC || "",
+      accounts: process.env.DEPLOYER_PRIVATE_KEY ? [process.env.DEPLOYER_PRIVATE_KEY] : [],
+    },
+  },
+  etherscan: {
+    apiKey: { polygonAmoy: process.env.POLYGONSCAN_API_KEY || "", polygon: process.env.POLYGONSCAN_API_KEY || "" },
+  },
+  gasReporter: { enabled: true, currency: "USD" },
+};
+
+export default config;
+EOF
+
+cat > .gitignore << 'EOF'
+node_modules
+artifacts
+cache
+coverage
+coverage.json
+typechain-types
+.env
+EOF
+
+cat > .env.example << 'EOF'
+POLYGON_AMOY_RPC="https://rpc-amoy.polygon.technology"
+POLYGON_RPC=""
+DEPLOYER_PRIVATE_KEY=""
+POLYGONSCAN_API_KEY=""
+PLATFORM_TREASURY_ADDRESS=""
+ARTIST_ADDRESS=""
+FACTORY_ADDRESS=""
+EOF
+
+cat > contracts/PolsiaSongNFT.sol << 'EOF'
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/token/common/ERC2981.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
+/// @title PolsiaSongNFT
+/// @notice Per-song NFT: tiered minting, EIP-2981 royalties, business-perk
+///         gating, and investor royalty streaming (checkpointed accrual).
+contract PolsiaSongNFT is ERC721, ERC2981, AccessControl, ReentrancyGuard {
+    bytes32 public constant ARTIST_ROLE = keccak256("ARTIST_ROLE");
+    bytes32 public constant PLATFORM_ROLE = keccak256("PLATFORM_ROLE");
+
+    enum Tier { COLLECTOR, SUPERFAN, INVESTOR }
+
+    struct TierConfig {
+        uint256 supplyTotal;
+        uint256 supplyMinted;
+        uint256 priceWei;
+        uint256 royaltyShareBps;
+        bool unlockExclusiveCut;
+        bool unlockDiscordRole;
+        bool unlockEquityOption;
+    }
+
+    uint256 private _nextTokenId;
+
+    string public songTitle;
+    address public artist;
+    address public platformTreasury;
+
+    mapping(Tier => TierConfig) public tierConfigs;
+    mapping(uint256 => Tier) public tokenTier;
+
+    // Royalty streaming: accrual-per-token pattern (scaled 1e18)
+    uint256 public accRoyaltyPerToken;
+    mapping(uint256 => uint256) public royaltyCheckpoint;
+
+    event TierMinted(address indexed buyer, uint256 indexed tokenId, Tier tier, uint256 pricePaid);
+    event RoyaltyDeposited(uint256 amount);
+    event RoyaltyClaimed(uint256 indexed tokenId, address indexed claimant, uint256 amount);
+    event BusinessPerkUnlocked(uint256 indexed tokenId, address indexed owner);
+
+    constructor(
+        string memory _songTitle,
+        string memory _symbol,
+        address _artist,
+        address _platformTreasury,
+        uint96 _royaltyBps,
+        TierConfig memory collectorConfig,
+        TierConfig memory superfanConfig,
+        TierConfig memory investorConfig
+    ) ERC721(_songTitle, _symbol) {
+        songTitle = _songTitle;
+        artist = _artist;
+        platformTreasury = _platformTreasury;
+
+        _grantRole(DEFAULT_ADMIN_ROLE, _platformTreasury);
+        _grantRole(ARTIST_ROLE, _artist);
+        _grantRole(PLATFORM_ROLE, _platformTreasury);
+
+        _setDefaultRoyalty(_artist, _royaltyBps);
+
+        tierConfigs[Tier.COLLECTOR] = collectorConfig;
+        tierConfigs[Tier.SUPERFAN] = superfanConfig;
+        tierConfigs[Tier.INVESTOR] = investorConfig;
+    }
+
+    // ─────────────────── MINTING ───────────────────
+
+    function mint(Tier tier) external payable nonReentrant returns (uint256) {
+        TierConfig storage config = tierConfigs[tier];
+
+        require(config.supplyMinted < config.supplyTotal, "Polsia: tier sold out");
+        require(msg.value >= config.priceWei, "Polsia: insufficient payment");
+
+        config.supplyMinted += 1;
+        uint256 tokenId = _nextTokenId;
+        _nextTokenId++;
+
+        tokenTier[tokenId] = tier;
+        _safeMint(msg.sender, tokenId);
+
+        if (tier == Tier.INVESTOR) {
+            royaltyCheckpoint[tokenId] = accRoyaltyPerToken;
+        }
+
+        // Split on PRICE, not msg.value (excess refunded below)
+        _distributePrimarySale(config.priceWei);
+
+        emit TierMinted(msg.sender, tokenId, tier, config.priceWei);
+        emit BusinessPerkUnlocked(tokenId, msg.sender);
+
+        if (msg.value > config.priceWei) {
+            (bool refunded, ) = msg.sender.call{value: msg.value - config.priceWei}("");
+            require(refunded, "Polsia: refund failed");
+        }
+
+        return tokenId;
+    }
+
+    function _distributePrimarySale(uint256 amount) internal {
+        // 70% artist / 30% platform treasury (platform's 30% covers the
+        // 20% platform fee + 10% marketing reinvestment, allocated off-chain)
+        uint256 artistShare = (amount * 7000) / 10000;
+        uint256 platformShare = amount - artistShare;
+
+        (bool a, ) = artist.call{value: artistShare}("");
+        require(a, "Polsia: artist payout failed");
+
+        (bool p, ) = platformTreasury.call{value: platformShare}("");
+        require(p, "Polsia: platform payout failed");
+    }
+
+    // ─────────── BUSINESS PERK GATING ───────────
+
+    function unlockBusinessPerk(uint256 tokenId)
+        external view
+        returns (bool exclusiveCut, bool discordRole, bool equityOption)
+    {
+        require(_ownerOf(tokenId) != address(0), "Polsia: token does not exist");
+        TierConfig memory config = tierConfigs[tokenTier[tokenId]];
+        return (config.unlockExclusiveCut, config.unlockDiscordRole, config.unlockEquityOption);
+    }
+
+    // ─────────── INVESTOR ROYALTY STREAMING ───────────
+
+    /// @notice Distributes deposits across investor tokens minted AT DEPOSIT
+    ///         TIME. Each token accrues only from deposits after its mint.
+    function depositStreamingRoyalty() external payable onlyRole(PLATFORM_ROLE) {
+        uint256 minted = tierConfigs[Tier.INVESTOR].supplyMinted;
+        require(minted > 0, "Polsia: no investors yet");
+        accRoyaltyPerToken +=
+            (msg.value * tierConfigs[Tier.INVESTOR].royaltyShareBps * 1e18) / 10000 / minted;
+        emit RoyaltyDeposited(msg.value);
+    }
+
+    function claimStreamingRoyalty(uint256 tokenId) external nonReentrant {
+        require(ownerOf(tokenId) == msg.sender, "Polsia: not token owner");
+        require(tokenTier[tokenId] == Tier.INVESTOR, "Polsia: not an investor tier token");
+
+        uint256 pending = (accRoyaltyPerToken - royaltyCheckpoint[tokenId]) / 1e18;
+        require(pending > 0, "Polsia: nothing to claim");
+
+        royaltyCheckpoint[tokenId] = accRoyaltyPerToken;
+
+        (bool success, ) = msg.sender.call{value: pending}("");
+        require(success, "Polsia: claim transfer failed");
+
+        emit RoyaltyClaimed(tokenId, msg.sender, pending);
+    }
+
+    // ─────────── ADMIN ───────────
+
+    function updateTierPrice(Tier tier, uint256 newPriceWei) external onlyRole(PLATFORM_ROLE) {
+        tierConfigs[tier].priceWei = newPriceWei;
+    }
+
+    function getTierAvailability(Tier tier) external view returns (uint256) {
+        TierConfig memory config = tierConfigs[tier];
+        return config.supplyTotal - config.supplyMinted;
+    }
+
+    function supportsInterface(bytes4 interfaceId)
+        public view override(ERC721, ERC2981, AccessControl) returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
+    }
+}
+EOF
+
+cat > contracts/PolsiaSongNFTFactory.sol << 'EOF'
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "./PolsiaSongNFT.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+contract PolsiaSongNFTFactory is Ownable {
+    address public platformTreasury;
+
+    struct DeployedSong {
+        address contractAddress;
+        address artist;
+        string songTitle;
+        uint256 deployedAt;
+    }
+
+    DeployedSong[] public deployedSongs;
+    mapping(address => address[]) public artistToContracts;
+
+    event SongContractDeployed(address indexed contractAddress, address indexed artist, string songTitle);
+
+    constructor(address _platformTreasury) Ownable(msg.sender) {
+        platformTreasury = _platformTreasury;
+    }
+
+    function deploySongContract(
+        string memory songTitle,
+        string memory symbol,
+        address artistAddr,
+        uint96 royaltyBps,
+        PolsiaSongNFT.TierConfig memory collectorConfig,
+        PolsiaSongNFT.TierConfig memory superfanConfig,
+        PolsiaSongNFT.TierConfig memory investorConfig
+    ) external onlyOwner returns (address) {
+        PolsiaSongNFT newContract = new PolsiaSongNFT(
+            songTitle, symbol, artistAddr, platformTreasury, royaltyBps,
+            collectorConfig, superfanConfig, investorConfig
+        );
+        address contractAddr = address(newContract);
+
+        deployedSongs.push(DeployedSong(contractAddr, artistAddr, songTitle, block.timestamp));
+        artistToContracts[artistAddr].push(contractAddr);
+
+        emit SongContractDeployed(contractAddr, artistAddr, songTitle);
+        return contractAddr;
+    }
+
+    function getDeployedSongsCount() external view returns (uint256) { return deployedSongs.length; }
+    function getArtistContracts(address artistAddr) external view returns (address[] memory) {
+        return artistToContracts[artistAddr];
+    }
+    function updatePlatformTreasury(address newTreasury) external onlyOwner {
+        platformTreasury = newTreasury;
+    }
+}
+EOF
+
+cat > contracts/interfaces/IPolsiaSongNFT.sol << 'EOF'
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+interface IPolsiaSongNFT {
+    enum Tier { COLLECTOR, SUPERFAN, INVESTOR }
+    function mint(Tier tier) external payable returns (uint256);
+    function unlockBusinessPerk(uint256 tokenId) external view returns (bool, bool, bool);
+    function claimStreamingRoyalty(uint256 tokenId) external;
+    function getTierAvailability(Tier tier) external view returns (uint256);
+}
+EOF
+
+cat > test/PolsiaSongNFT.test.ts << 'EOF'
+import { expect } from "chai";
+import { ethers } from "hardhat";
+import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+
+describe("PolsiaSongNFT", function () {
+  async function deployFixture() {
+    const [platform, artist, buyer1, buyer2] = await ethers.getSigners();
+
+    const mkTier = (supply: number, price: string, royaltyBps: number, equity: boolean) => ({
+      supplyTotal: supply, supplyMinted: 0, priceWei: ethers.parseEther(price),
+      royaltyShareBps: royaltyBps,
+      unlockExclusiveCut: true, unlockDiscordRole: true, unlockEquityOption: equity,
+    });
+
+    const PolsiaSongNFT = await ethers.getContractFactory("PolsiaSongNFT");
+    const contract = await PolsiaSongNFT.deploy(
+      "Midnight Echo", "MECHO", artist.address, platform.address, 1000,
+      mkTier(1000, "0.01", 0, false),
+      mkTier(100, "0.1", 0, false),
+      mkTier(10, "1.0", 500, true)
+    );
+    return { contract, platform, artist, buyer1, buyer2 };
+  }
+
+  describe("Minting", function () {
+    it("mints Collector tier and assigns owner", async function () {
+      const { contract, buyer1 } = await loadFixture(deployFixture);
+      await contract.connect(buyer1).mint(0, { value: ethers.parseEther("0.01") });
+      expect(await contract.ownerOf(0)).to.equal(buyer1.address);
+    });
+
+    it("rejects insufficient payment", async function () {
+      const { contract, buyer1 } = await loadFixture(deployFixture);
+      await expect(contract.connect(buyer1).mint(0, { value: ethers.parseEther("0.001") }))
+        .to.be.revertedWith("Polsia: insufficient payment");
+    });
+
+    it("refunds overpayment", async function () {
+      const { contract, buyer1 } = await loadFixture(deployFixture);
+      const before = await ethers.provider.getBalance(buyer1.address);
+      const tx = await contract.connect(buyer1).mint(0, { value: ethers.parseEther("0.02") });
+      const receipt = await tx.wait();
+      const gas = receipt!.gasUsed * receipt!.gasPrice;
+      const after = await ethers.provider.getBalance(buyer1.address);
+      expect(before - after).to.be.closeTo(ethers.parseEther("0.01") + gas, ethers.parseEther("0.0001"));
+    });
+
+    it("enforces supply cap per tier", async function () {
+      const { contract, buyer2 } = await loadFixture(deployFixture);
+      const signers = await ethers.getSigners();
+      for (let i = 0; i < 10; i++) {
+        await contract.connect(signers[i]).mint(2, { value: ethers.parseEther("1.0") });
+      }
+      await expect(contract.connect(buyer2).mint(2, { value: ethers.parseEther("1.0") }))
+        .to.be.revertedWith("Polsia: tier sold out");
+    });
+
+    it("distributes primary sale 70/30 on price (not overpayment)", async function () {
+      const { contract, artist, platform, buyer1 } = await loadFixture(deployFixture);
+      const aB = await ethers.provider.getBalance(artist.address);
+      const pB = await ethers.provider.getBalance(platform.address);
+      await contract.connect(buyer1).mint(0, { value: ethers.parseEther("0.02") }); // overpay
+      expect((await ethers.provider.getBalance(artist.address)) - aB).to.equal(ethers.parseEther("0.007"));
+      expect((await ethers.provider.getBalance(platform.address)) - pB).to.equal(ethers.parseEther("0.003"));
+    });
+  });
+
+  describe("EIP-2981", function () {
+    it("returns 10% royalty to artist on secondary sale", async function () {
+      const { contract, artist, buyer1 } = await loadFixture(deployFixture);
+      await contract.connect(buyer1).mint(0, { value: ethers.parseEther("0.01") });
+      const [receiver, amount] = await contract.royaltyInfo(0, ethers.parseEther("1.0"));
+      expect(receiver).to.equal(artist.address);
+      expect(amount).to.equal(ethers.parseEther("0.1"));
+    });
+  });
+
+  describe("Perk Gating", function () {
+    it("returns correct perks per tier", async function () {
+      const { contract, buyer1 } = await loadFixture(deployFixture);
+      await contract.connect(buyer1).mint(0, { value: ethers.parseEther("0.01") });
+      const [cut, discord, equity] = await contract.unlockBusinessPerk(0);
+      expect(cut).to.be.true; expect(discord).to.be.true; expect(equity).to.be.false;
+    });
+    it("reverts for nonexistent token", async function () {
+      const { contract } = await loadFixture(deployFixture);
+      await expect(contract.unlockBusinessPerk(999)).to.be.revertedWith("Polsia: token does not exist");
+    });
+  });
+
+  describe("Investor Royalty Streaming", function () {
+    it("pays pro-rata share to minted investor", async function () {
+      const { contract, platform, buyer1 } = await loadFixture(deployFixture);
+      await contract.connect(buyer1).mint(2, { value: ethers.parseEther("1.0") });
+      await contract.connect(platform).depositStreamingRoyalty({ value: ethers.parseEther("10.0") });
+      const before = await ethers.provider.getBalance(buyer1.address);
+      const tx = await contract.connect(buyer1).claimStreamingRoyalty(0);
+      const receipt = await tx.wait();
+      const gas = receipt!.gasUsed * receipt!.gasPrice;
+      expect((await ethers.provider.getBalance(buyer1.address)) - before + gas)
+        .to.equal(ethers.parseEther("0.5"));
+    });
+
+    it("prevents double-claim", async function () {
+      const { contract, platform, buyer1 } = await loadFixture(deployFixture);
+      await contract.connect(buyer1).mint(2, { value: ethers.parseEther("1.0") });
+      await contract.connect(platform).depositStreamingRoyalty({ value: ethers.parseEther("10.0") });
+      await contract.connect(buyer1).claimStreamingRoyalty(0);
+      await expect(contract.connect(buyer1).claimStreamingRoyalty(0))
+        .to.be.revertedWith("Polsia: nothing to claim");
+    });
+
+    it("rejects claim from non-owner", async function () {
+      const { contract, platform, buyer1, buyer2 } = await loadFixture(deployFixture);
+      await contract.connect(buyer1).mint(2, { value: ethers.parseEther("1.0") });
+      await contract.connect(platform).depositStreamingRoyalty({ value: ethers.parseEther("10.0") });
+      await expect(contract.connect(buyer2).claimStreamingRoyalty(0))
+        .to.be.revertedWith("Polsia: not token owner");
+    });
+
+    it("rejects claim on non-investor token", async function () {
+      const { contract, platform, buyer1 } = await loadFixture(deployFixture);
+      await contract.connect(buyer1).mint(0, { value: ethers.parseEther("0.01") });
+      await contract.connect(platform).depositStreamingRoyalty({ value: ethers.parseEther("10.0") });
+      await expect(contract.connect(buyer1).claimStreamingRoyalty(0))
+        .to.be.revertedWith("Polsia: not an investor tier token");
+    });
+
+    it("rejects deposit before any investor mints", async function () {
+      const { contract, platform } = await loadFixture(deployFixture);
+      await expect(contract.connect(platform).depositStreamingRoyalty({ value: 1 }))
+        .to.be.revertedWith("Polsia: no investors yet");
+    });
+  });
+
+  describe("Access Control", function () {
+    it("blocks non-platform royalty deposit", async function () {
+      const { contract, buyer1 } = await loadFixture(deployFixture);
+      await expect(contract.connect(buyer1).depositStreamingRoyalty({ value: 1 })).to.be.reverted;
+    });
+    it("blocks non-platform price update", async function () {
+      const { contract, buyer1 } = await loadFixture(deployFixture);
+      await expect(contract.connect(buyer1).updateTierPrice(0, 1)).to.be.reverted;
+    });
+  });
+});
+EOF
+
+cat > test/PolsiaSongNFTFactory.test.ts << 'EOF'
+import { expect } from "chai";
+import { ethers } from "hardhat";
+import { loadFixture } from "@nomicfoundation/hardhat-toolbox/network-helpers";
+
+describe("PolsiaSongNFTFactory", function () {
+  async function deployFactoryFixture() {
+    const [owner, artist, platform] = await ethers.getSigners();
+    const Factory = await ethers.getContractFactory("PolsiaSongNFTFactory");
+    const factory = await Factory.deploy(platform.address);
+    const tierConfig = {
+      supplyTotal: 100, supplyMinted: 0, priceWei: ethers.parseEther("0.01"),
+      royaltyShareBps: 0, unlockExclusiveCut: true, unlockDiscordRole: true, unlockEquityOption: false,
+    };
+    return { factory, owner, artist, platform, tierConfig };
+  }
+
+  it("deploys a song contract", async function () {
+    const { factory, artist, tierConfig } = await loadFixture(deployFactoryFixture);
+    await factory.deploySongContract("Test Song", "TEST", artist.address, 1000, tierConfig, tierConfig, tierConfig);
+    expect(await factory.getDeployedSongsCount()).to.equal(1);
+    expect((await factory.getArtistContracts(artist.address)).length).to.equal(1);
+  });
+
+  it("only owner can deploy", async function () {
+    const { factory, artist, tierConfig } = await loadFixture(deployFactoryFixture);
+    const notOwner = (await ethers.getSigners())[5];
+    await expect(factory.connect(notOwner).deploySongContract(
+      "S", "S", artist.address, 1000, tierConfig, tierConfig, tierConfig
+    )).to.be.revertedWithCustomError(factory, "OwnableUnauthorizedAccount");
+  });
+
+  it("tracks multiple contracts per artist", async function () {
+    const { factory, artist, tierConfig } = await loadFixture(deployFactoryFixture);
+    await factory.deploySongContract("A", "A", artist.address, 1000, tierConfig, tierConfig, tierConfig);
+    await factory.deploySongContract("B", "B", artist.address, 1000, tierConfig, tierConfig, tierConfig);
+    expect((await factory.getArtistContracts(artist.address)).length).to.equal(2);
+  });
+});
+EOF
+
+cat > scripts/deployFactory.ts << 'EOF'
+import { ethers } from "hardhat";
+
+async function main() {
+  const platformTreasury = process.env.PLATFORM_TREASURY_ADDRESS!;
+  const Factory = await ethers.getContractFactory("PolsiaSongNFTFactory");
+  const factory = await Factory.deploy(platformTreasury);
+  await factory.waitForDeployment();
+  console.log("Factory deployed to:", await factory.getAddress());
+}
+main().catch((e) => { console.error(e); process.exitCode = 1; });
+EOF
+
+cat > scripts/deploySong.ts << 'EOF'
+import { ethers } from "hardhat";
+
+async function main() {
+  const factory = await ethers.getContractAt(
+    "PolsiaSongNFTFactory", process.env.FACTORY_ADDRESS!
+  );
+  const tier = (supply: number, price: string, royaltyBps: number, equity: boolean) => ({
+    supplyTotal: supply, supplyMinted: 0, priceWei: ethers.parseEther(price),
+    royaltyShareBps: royaltyBps,
+    unlockExclusiveCut: true, unlockDiscordRole: true, unlockEquityOption: equity,
+  });
+
+  const tx = await factory.deploySongContract(
+    process.env.SONG_TITLE || "Midnight Echo", "MECHO",
+    process.env.ARTIST_ADDRESS!, 1000,
+    tier(1000, "0.01", 0, false), tier(100, "0.1", 0, false), tier(10, "1.0", 500, true)
+  );
+  const receipt = await tx.wait();
+  console.log("Song contract deployed, tx:", receipt?.hash);
+}
+main().catch((e) => { console.error(e); process.exitCode = 1; });
+EOF
+
+echo "✅ polsia-contracts generated. Next:"
+echo "   cp .env.example .env  (then fill values)"
+echo "   npm install && npx hardhat compile && npx hardhat test"
