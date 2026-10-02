@@ -1,0 +1,937 @@
+cd ~/projects/polsia
+cat > patch_studios.sh << 'ENDOFSCRIPT'
+#!/bin/bash
+set -e
+cd polsia-web
+
+# ─────────────────────────────────────
+# SONG STUDIO - CREATE NEW
+# ─────────────────────────────────────
+mkdir -p app/studio/song/new
+
+cat > app/studio/song/new/page.tsx << 'EOF'
+"use client";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { api } from "@/lib/api";
+
+export default function NewSongPage() {
+  const router = useRouter();
+  const [title, setTitle] = useState("");
+  const [lyrics, setLyrics] = useState("");
+  const [mood, setMood] = useState(0.5);
+  const [tempo, setTempo] = useState(120);
+  const [musicalKey, setMusicalKey] = useState("C Minor");
+  const [creating, setCreating] = useState(false);
+
+  const clientId = typeof window !== "undefined" ? localStorage.getItem("polsia_client_id") : null;
+
+  const handleCreate = async () => {
+    if (!clientId || !title) return;
+    setCreating(true);
+    try {
+      const song = await api.songs.create({
+        clientId,
+        title,
+        lyricsInput: lyrics,
+        moodValue: mood,
+        tempoBpm: tempo,
+        musicalKey,
+      });
+      router.push(`/studio/song/${song.id}`);
+    } catch (err) {
+      console.error(err);
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen p-8 max-w-2xl mx-auto">
+      <h1 className="text-2xl font-bold mb-6">Create New Song</h1>
+
+      <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-6 space-y-5">
+        <div>
+          <label className="text-sm text-neutral-400">Song Title *</label>
+          <input
+            value={title}
+            onChange={e => setTitle(e.target.value)}
+            placeholder="Midnight Echo"
+            className="w-full mt-1 bg-neutral-900 border border-neutral-500 rounded-md p-3 text-sm"
+          />
+        </div>
+
+        <div>
+          <label className="text-sm text-neutral-400">Lyrics / Theme / Prompt</label>
+          <textarea
+            value={lyrics}
+            onChange={e => setLyrics(e.target.value)}
+            rows={6}
+            placeholder="Write your lyrics or describe the vibe you want..."
+            className="w-full mt-1 bg-neutral-900 border border-neutral-500 rounded-md p-3 text-sm resize-none"
+          />
+        </div>
+
+        <div>
+          <label className="text-sm text-neutral-400">
+            Mood: {mood < 0.3 ? "Chill" : mood < 0.7 ? "Balanced" : "Hype"} ({(mood * 100).toFixed(0)}%)
+          </label>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={mood}
+            onChange={e => setMood(parseFloat(e.target.value))}
+            className="w-full mt-1 accent-primary"
+          />
+          <div className="flex justify-between text-xs text-neutral-400 mt-1">
+            <span>Chill</span><span>Hype</span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="text-sm text-neutral-400">Tempo (BPM)</label>
+            <input
+              type="number"
+              value={tempo}
+              onChange={e => setTempo(parseInt(e.target.value) || 120)}
+              className="w-full mt-1 bg-neutral-900 border border-neutral-500 rounded-md p-3 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-sm text-neutral-400">Key</label>
+            <select
+              value={musicalKey}
+              onChange={e => setMusicalKey(e.target.value)}
+              className="w-full mt-1 bg-neutral-900 border border-neutral-500 rounded-md p-3 text-sm"
+            >
+              {["C Major","C Minor","D Major","D Minor","E Major","E Minor",
+                "F Major","F Minor","G Major","G Minor","A Major","A Minor",
+                "B Major","B Minor"].map(k => (
+                <option key={k} value={k}>{k}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {!clientId && (
+          <p className="text-accent text-xs">No client profile found. <a href="/onboarding/profile" className="underline">Complete onboarding first.</a></p>
+        )}
+
+        <button
+          onClick={handleCreate}
+          disabled={!title || !clientId || creating}
+          className="w-full bg-primary text-white rounded-md py-3 font-medium disabled:opacity-40"
+        >
+          {creating ? "Creating..." : "Create Song Draft →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# SONG STUDIO - GENERATE / MONITOR / APPROVE
+# ─────────────────────────────────────
+cat > 'app/studio/song/[id]/page.tsx' << 'EOF'
+"use client";
+import { useEffect, useState, useCallback } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { api } from "@/lib/api";
+import { useJobStatus } from "@/hooks/useJobStatus";
+import { StatusChip } from "@/components/ui/StatusChip";
+import { PipelineBadge } from "@/components/ui/PipelineBadge";
+import { ProgressQueueWidget } from "@/components/ui/ProgressQueueWidget";
+import { DisclaimerBanner } from "@/components/ui/DisclaimerBanner";
+import type { Song, GenerationJob, JobStage } from "@/types";
+
+export default function SongStudioPage() {
+  const params = useParams();
+  const router = useRouter();
+  const songId = params.id as string;
+
+  const [song, setSong] = useState<Song | null>(null);
+  const [jobs, setJobs] = useState<GenerationJob[]>([]);
+  const [generating, setGenerating] = useState(false);
+  const [approving, setApproving] = useState(false);
+
+  const compositionJob = jobs.find(j => j.jobType === "AUDIO_COMPOSITION");
+  const mixJob = jobs.find(j => j.jobType === "AUDIO_MIX");
+
+  const { stage: compStage } = useJobStatus(compositionJob?.id, compositionJob?.stage || "QUEUED");
+  const { stage: mixStage } = useJobStatus(mixJob?.id, mixJob?.stage || "QUEUED");
+
+  const loadSong = useCallback(async () => {
+    try {
+      const s = await api.songs.get(songId);
+      setSong(s);
+    } catch (err) {
+      console.error("Failed to load song:", err);
+    }
+  }, [songId]);
+
+  const loadJobs = useCallback(async () => {
+    try {
+      const j = await api.songs.getJobs(songId);
+      setJobs(j);
+    } catch (err) {
+      console.error("Failed to load jobs:", err);
+    }
+  }, [songId]);
+
+  useEffect(() => {
+    loadSong();
+    loadJobs();
+  }, [loadSong, loadJobs]);
+
+  // Refresh song status when jobs complete
+  useEffect(() => {
+    if (compStage === "COMPLETE" || mixStage === "COMPLETE") {
+      loadSong();
+    }
+  }, [compStage, mixStage, loadSong]);
+
+  const handleGenerate = async () => {
+    setGenerating(true);
+    try {
+      const result = await api.songs.generate(songId, "HYBRID");
+      await loadJobs();
+      await loadSong();
+    } catch (err) {
+      console.error("Generation failed:", err);
+    }
+    setGenerating(false);
+  };
+
+  const handleApprove = async () => {
+    setApproving(true);
+    try {
+      const updated = await api.songs.approve(songId);
+      setSong(updated);
+    } catch (err) {
+      console.error("Approve failed:", err);
+    }
+    setApproving(false);
+  };
+
+  const overallStatus = song?.status || "DRAFT";
+  const hasJobs = jobs.length > 0;
+  const isApproved = overallStatus === "APPROVED" || overallStatus === "PUBLISHED";
+
+  const queueItems: { label: string; stage: JobStage; eta?: string }[] = hasJobs
+    ? [
+        { label: "AI composition pass", stage: compStage, eta: compStage === "PROCESSING" ? "~30 seconds" : undefined },
+        { label: "Human producer polish", stage: mixStage, eta: mixStage === "NEEDS_HUMAN_INPUT" ? "4-6 hours" : undefined },
+      ]
+    : [
+        { label: "AI composition pass", stage: "QUEUED" as JobStage },
+        { label: "Human producer polish", stage: "QUEUED" as JobStage, eta: "4-6 hours" },
+      ];
+
+  return (
+    <div className="min-h-screen p-8">
+      <div className="flex items-center justify-between mb-6 max-w-5xl mx-auto">
+        <div>
+          <h1 className="text-xl font-bold">Song Studio</h1>
+          <p className="text-sm text-neutral-400 mt-1">{song?.title || "Loading..."}</p>
+        </div>
+        <PipelineBadge mode={song?.pipelineMode || "HYBRID"} />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-5xl mx-auto">
+        {/* LEFT: Song Details */}
+        <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-6 space-y-4">
+          <h2 className="text-sm font-semibold text-neutral-400">Song Details</h2>
+
+          <div>
+            <label className="text-xs text-neutral-400">Title</label>
+            <p className="text-sm mt-0.5">{song?.title || "—"}</p>
+          </div>
+
+          {song?.lyricsInput && (
+            <div>
+              <label className="text-xs text-neutral-400">Lyrics / Prompt</label>
+              <p className="text-sm mt-0.5 whitespace-pre-wrap bg-neutral-900 rounded-md p-3 max-h-40 overflow-y-auto">
+                {song.lyricsInput}
+              </p>
+            </div>
+          )}
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="text-xs text-neutral-400">Mood</label>
+              <p className="text-sm mt-0.5">{((song?.moodValue ?? 0.5) * 100).toFixed(0)}%</p>
+            </div>
+            <div>
+              <label className="text-xs text-neutral-400">Tempo</label>
+              <p className="text-sm mt-0.5">{song?.tempoBpm ?? "—"} BPM</p>
+            </div>
+            <div>
+              <label className="text-xs text-neutral-400">Key</label>
+              <p className="text-sm mt-0.5">{song?.musicalKey ?? "—"}</p>
+            </div>
+          </div>
+
+          {!hasJobs && !isApproved && (
+            <button
+              onClick={handleGenerate}
+              disabled={generating}
+              className="w-full bg-primary text-white rounded-md py-3 font-medium disabled:opacity-40"
+            >
+              {generating ? "Starting Generation..." : "Generate Draft"}
+            </button>
+          )}
+
+          <DisclaimerBanner type="ai_content" />
+        </div>
+
+        {/* RIGHT: Pipeline Progress */}
+        <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-6 space-y-4">
+          <h2 className="text-sm font-semibold text-neutral-400">Pipeline Progress</h2>
+
+          {/* Audio Preview Area */}
+          <div className="bg-neutral-900 rounded-[12px] p-4 min-h-[80px] flex items-center justify-center">
+            {!hasJobs && (
+              <p className="text-sm text-neutral-400">Click "Generate Draft" to begin</p>
+            )}
+            {hasJobs && compStage !== "COMPLETE" && (
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                <p className="text-sm text-neutral-400">AI is composing your track...</p>
+              </div>
+            )}
+            {hasJobs && compStage === "COMPLETE" && (
+              <div className="w-full">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+                    <span className="text-primary text-lg">♪</span>
+                  </div>
+                  <span className="text-sm">AI Draft Ready</span>
+                </div>
+                {/* Simulated waveform */}
+                <div className="flex items-end gap-0.5 h-10">
+                  {Array.from({ length: 60 }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="flex-1 bg-primary/60 rounded-sm"
+                      style={{ height: `${Math.random() * 100}%` }}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <StatusChip status={hasJobs ? compStage : overallStatus} />
+
+          <ProgressQueueWidget items={queueItems} />
+
+          {/* Action Buttons */}
+          <div className="flex gap-3 pt-2">
+            {hasJobs && !isApproved && (
+              <>
+                <button
+                  onClick={handleGenerate}
+                  disabled={generating || compStage === "PROCESSING"}
+                  className="flex-1 border border-neutral-500 rounded-md py-2 text-sm disabled:opacity-40"
+                >
+                  Regenerate
+                </button>
+                <button
+                  onClick={handleApprove}
+                  disabled={approving || compStage !== "COMPLETE"}
+                  className="flex-1 bg-secondary text-neutral-900 rounded-md py-2 text-sm font-medium disabled:opacity-40"
+                >
+                  {approving ? "Approving..." : "Approve Draft"}
+                </button>
+              </>
+            )}
+
+            {isApproved && (
+              <button
+                onClick={() => router.push(`/studio/video/${songId}`)}
+                className="flex-1 bg-primary text-white rounded-md py-2 text-sm font-medium"
+              >
+                Create Music Video →
+              </button>
+            )}
+          </div>
+
+          {isApproved && (
+            <div className="bg-secondary/10 border border-secondary/30 rounded-md p-3 text-sm text-secondary">
+              ✓ Song approved! You can now create a music video or proceed to the bundle builder.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# VIDEO STUDIO
+# ─────────────────────────────────────
+cat > 'app/studio/video/[id]/page.tsx' << 'EOF'
+"use client";
+import { useEffect, useState, useCallback } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { api } from "@/lib/api";
+import { useJobStatus } from "@/hooks/useJobStatus";
+import { StatusChip } from "@/components/ui/StatusChip";
+import { PipelineBadge } from "@/components/ui/PipelineBadge";
+import { ProgressQueueWidget } from "@/components/ui/ProgressQueueWidget";
+import { DisclaimerBanner } from "@/components/ui/DisclaimerBanner";
+import type { GenerationJob, JobStage } from "@/types";
+
+export default function VideoStudioPage() {
+  const params = useParams();
+  const router = useRouter();
+  const songId = params.id as string;
+
+  const [song, setSong] = useState<any>(null);
+  const [videoId, setVideoId] = useState<string | null>(null);
+  const [jobs, setJobs] = useState<GenerationJob[]>([]);
+  const [scenes, setScenes] = useState(["", ""]);
+  const [cameraStyle, setCameraStyle] = useState("Dynamic");
+  const [colorPalette, setColorPalette] = useState(["#6C4DFF", "#00E5A0", "#FF4D6D"]);
+  const [generating, setGenerating] = useState(false);
+  const [approved, setApproved] = useState(false);
+
+  const renderJob = jobs.find(j => j.jobType === "VIDEO_RENDER");
+  const editJob = jobs.find(j => j.jobType === "VIDEO_EDIT");
+
+  const { stage: renderStage } = useJobStatus(renderJob?.id, renderJob?.stage || "QUEUED");
+  const { stage: editStage } = useJobStatus(editJob?.id, editJob?.stage || "QUEUED");
+
+  const loadSong = useCallback(async () => {
+    try {
+      const s = await api.songs.get(songId);
+      setSong(s);
+      if (s.video) {
+        setVideoId(s.video.id);
+        setScenes(s.video.scenePrompts?.length ? s.video.scenePrompts : ["", ""]);
+        setCameraStyle(s.video.cameraStyle || "Dynamic");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }, [songId]);
+
+  useEffect(() => { loadSong(); }, [loadSong]);
+
+  const addScene = () => setScenes([...scenes, ""]);
+  const removeScene = (i: number) => setScenes(scenes.filter((_, idx) => idx !== i));
+  const updateScene = (i: number, val: string) => {
+    const next = [...scenes];
+    next[i] = val;
+    setScenes(next);
+  };
+
+  const handleGenerate = async () => {
+    setGenerating(true);
+    try {
+      const filteredScenes = scenes.filter(s => s.trim());
+      if (filteredScenes.length === 0) {
+        alert("Add at least one scene prompt");
+        setGenerating(false);
+        return;
+      }
+
+      let vid = videoId;
+      if (!vid) {
+        const video = await api.videos.create({
+          songId,
+          scenePrompts: filteredScenes,
+          cameraStyle,
+          colorPalette,
+          styleRefUrls: [],
+        });
+        vid = video.id;
+        setVideoId(vid);
+      }
+
+      const result = await api.videos.generate(vid);
+
+      // Reload to get job IDs
+      const s = await api.songs.get(songId);
+      if (s.video) {
+        // Fetch video-specific jobs
+        const allJobs = await api.songs.getJobs(songId);
+        // Video jobs have videoId set
+        setJobs(allJobs.filter((j: any) => j.videoId));
+      }
+    } catch (err) {
+      console.error("Video generation failed:", err);
+    }
+    setGenerating(false);
+  };
+
+  const handleApprove = () => {
+    setApproved(true);
+  };
+
+  const renderProgress = renderStage === "COMPLETE" ? 100 : renderStage === "PROCESSING" ? 65 : 0;
+
+  const queueItems: { label: string; stage: JobStage; eta?: string }[] = jobs.length > 0
+    ? [
+        { label: "Scene draft render", stage: renderStage },
+        { label: "Beat-sync pass", stage: renderStage === "COMPLETE" ? "COMPLETE" as JobStage : "QUEUED" as JobStage },
+        { label: "Editor finishing touch", stage: editStage, eta: editStage === "NEEDS_HUMAN_INPUT" ? "6 hours" : undefined },
+      ]
+    : [
+        { label: "Scene draft render", stage: "QUEUED" as JobStage },
+        { label: "Beat-sync pass", stage: "QUEUED" as JobStage },
+        { label: "Editor finishing touch", stage: "QUEUED" as JobStage, eta: "6 hours" },
+      ];
+
+  return (
+    <div className="min-h-screen p-8">
+      <div className="flex items-center justify-between mb-6 max-w-5xl mx-auto">
+        <div>
+          <h1 className="text-xl font-bold">Video Studio</h1>
+          <p className="text-sm text-neutral-400 mt-1">{song?.title || "Loading..."}</p>
+        </div>
+        <PipelineBadge mode="HYBRID" />
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-5xl mx-auto">
+        {/* LEFT: Style Board */}
+        <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-6 space-y-4">
+          <h2 className="text-sm font-semibold text-neutral-400">Style Board</h2>
+
+          <div>
+            <label className="text-sm text-neutral-400">Camera Style</label>
+            <select
+              value={cameraStyle}
+              onChange={e => setCameraStyle(e.target.value)}
+              className="w-full mt-1 bg-neutral-900 border border-neutral-500 rounded-md p-2 text-sm"
+            >
+              <option>Dynamic</option>
+              <option>Static / Cinematic</option>
+              <option>Handheld</option>
+              <option>Drone / Aerial</option>
+              <option>Close-up / Intimate</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-sm text-neutral-400">Color Palette</label>
+            <div className="flex gap-2 mt-1">
+              {colorPalette.map((color, i) => (
+                <input
+                  key={i}
+                  type="color"
+                  value={color}
+                  onChange={e => {
+                    const next = [...colorPalette];
+                    next[i] = e.target.value;
+                    setColorPalette(next);
+                  }}
+                  className="w-10 h-10 rounded-md border border-neutral-500 cursor-pointer bg-transparent"
+                />
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="text-sm text-neutral-400">Scene Prompts</label>
+            {scenes.map((scene, i) => (
+              <div key={i} className="flex gap-2 mt-2">
+                <input
+                  value={scene}
+                  onChange={e => updateScene(i, e.target.value)}
+                  placeholder={`Scene ${i + 1}: Describe the visual...`}
+                  className="flex-1 bg-neutral-900 border border-neutral-500 rounded-md p-2 text-sm"
+                />
+                {scenes.length > 1 && (
+                  <button
+                    onClick={() => removeScene(i)}
+                    className="text-accent text-xs px-2 hover:bg-accent/10 rounded"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            ))}
+            <button onClick={addScene} className="text-xs text-primary mt-2 hover:underline">
+              + Add scene
+            </button>
+          </div>
+
+          <button
+            onClick={handleGenerate}
+            disabled={generating}
+            className="w-full bg-primary text-white rounded-md py-3 font-medium disabled:opacity-40"
+          >
+            {generating ? "Starting Generation..." : jobs.length > 0 ? "Regenerate Video" : "Generate Video"}
+          </button>
+
+          <DisclaimerBanner type="ai_content" />
+        </div>
+
+        {/* RIGHT: Preview + Pipeline */}
+        <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-6 space-y-4">
+          <h2 className="text-sm font-semibold text-neutral-400">Preview & Pipeline</h2>
+
+          {/* Video Preview Area */}
+          <div className="bg-neutral-900 rounded-[12px] aspect-video flex items-center justify-center relative overflow-hidden">
+            {jobs.length === 0 && (
+              <p className="text-sm text-neutral-400">Configure style and generate</p>
+            )}
+            {jobs.length > 0 && renderStage !== "COMPLETE" && (
+              <div className="text-center">
+                <div className="w-12 h-12 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+                <p className="text-sm text-neutral-400">Rendering scenes...</p>
+                <div className="w-48 h-1.5 bg-neutral-500 rounded-full mt-2 mx-auto">
+                  <div
+                    className="h-1.5 bg-primary rounded-full transition-all duration-1000"
+                    style={{ width: `${renderProgress}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            {jobs.length > 0 && renderStage === "COMPLETE" && (
+              <div className="relative w-full h-full">
+                {/* Simulated video frames */}
+                <div className="absolute inset-0 grid grid-cols-3 grid-rows-2 gap-1 p-2">
+                  {scenes.filter(s => s).slice(0, 6).map((_, i) => (
+                    <div
+                      key={i}
+                      className="rounded bg-gradient-to-br from-primary/30 to-secondary/20 flex items-center justify-center"
+                    >
+                      <span className="text-xs text-neutral-400">Scene {i + 1}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="absolute bottom-2 left-2 right-2 flex items-center gap-2">
+                  <button className="w-8 h-8 rounded-full bg-white/90 flex items-center justify-center">
+                    <span className="text-neutral-900 text-sm ml-0.5">▶</span>
+                  </button>
+                  <div className="flex-1 h-1 bg-neutral-500 rounded-full">
+                    <div className="h-1 bg-primary rounded-full w-0" />
+                  </div>
+                  <span className="text-xs text-neutral-400">0:00</span>
+                </div>
+              </div>
+            )}
+
+            {/* Pipeline Badge overlay */}
+            <div className="absolute top-2 right-2">
+              <PipelineBadge mode="HYBRID" />
+            </div>
+          </div>
+
+          {/* Timeline */}
+          {jobs.length > 0 && renderStage === "COMPLETE" && (
+            <div>
+              <label className="text-xs text-neutral-400">Timeline — Beat-sync markers</label>
+              <div className="flex items-center gap-1 mt-1 h-6 bg-neutral-900 rounded-md px-2">
+                {Array.from({ length: 20 }).map((_, i) => (
+                  <div key={i} className={`flex-1 h-3 rounded-sm ${i % 4 === 0 ? "bg-primary" : "bg-neutral-500"}`} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          <StatusChip status={jobs.length > 0 ? renderStage : "DRAFT"} />
+
+          <ProgressQueueWidget items={queueItems} />
+
+          {/* Action Buttons */}
+          <div className="flex gap-3 pt-2">
+            {jobs.length > 0 && !approved && (
+              <button
+                onClick={handleApprove}
+                disabled={renderStage !== "COMPLETE"}
+                className="flex-1 bg-secondary text-neutral-900 rounded-md py-2 text-sm font-medium disabled:opacity-40"
+              >
+                Approve for Bundle
+              </button>
+            )}
+
+            {approved && (
+              <button
+                onClick={() => router.push(`/bundle-builder/${songId}`)}
+                className="flex-1 bg-primary text-white rounded-md py-2 text-sm font-medium"
+              >
+                Continue to Bundle Builder →
+              </button>
+            )}
+          </div>
+
+          {approved && (
+            <div className="bg-secondary/10 border border-secondary/30 rounded-md p-3 text-sm text-secondary">
+              ✓ Video approved! Continue to the bundle builder to configure your NFT and product tiers.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# BUNDLE BUILDER
+# ─────────────────────────────────────
+cat > 'app/bundle-builder/[songId]/page.tsx' << 'EOF'
+"use client";
+import { useEffect, useState } from "react";
+import { useParams, useRouter } from "next/navigation";
+import { api } from "@/lib/api";
+import { TierSelector } from "@/components/ui/TierSelector";
+import { ValuationCard } from "@/components/ui/ValuationCard";
+import { DisclaimerBanner } from "@/components/ui/DisclaimerBanner";
+import { PipelineBadge } from "@/components/ui/PipelineBadge";
+import type { Valuation } from "@/types";
+
+const PRODUCT_TIERS = [
+  { id: "STARTER", name: "Starter", description: "Song + NFT", price: "$97" },
+  { id: "GROWTH", name: "Growth", description: "+Video +Marketing", price: "$297", recommended: true },
+  { id: "ENTERPRISE", name: "Enterprise", description: "+Full Suite", price: "$997" },
+];
+
+export default function BundleBuilderPage() {
+  const params = useParams();
+  const router = useRouter();
+  const songId = params.songId as string;
+
+  const [song, setSong] = useState<any>(null);
+  const [valuation, setValuation] = useState<Valuation | null>(null);
+  const [selectedTier, setSelectedTier] = useState<string>("GROWTH");
+  const [supply, setSupply] = useState({ collector: 1000, superfan: 100, investor: 10 });
+  const [royaltyPct, setRoyaltyPct] = useState(10);
+  const [chain, setChain] = useState("POLYGON");
+  const [perks, setPerks] = useState<string[]>(["exclusive_cut", "discord_role"]);
+  const [configuring, setConfiguring] = useState(false);
+
+  const clientId = typeof window !== "undefined" ? localStorage.getItem("polsia_client_id") : null;
+
+  useEffect(() => {
+    api.songs.get(songId).then(setSong).catch(() => {});
+    api.valuation.get(songId).then(v => { if (v) setValuation(v); }).catch(() => {});
+  }, [songId]);
+
+  const togglePerk = (perk: string) => {
+    setPerks(prev => prev.includes(perk) ? prev.filter(p => p !== perk) : [...prev, perk]);
+  };
+
+  const handleConfigure = async () => {
+    if (!clientId) return;
+    setConfiguring(true);
+    try {
+      // Configure NFT
+      await api.nft.configure({
+        songId,
+        chain,
+        royaltyBps: royaltyPct * 100,
+        tiers: [
+          { tierName: "COLLECTOR", supplyTotal: supply.collector, priceUsd: 25, unlockPerks: perks },
+          { tierName: "SUPERFAN", supplyTotal: supply.superfan, priceUsd: 250, unlockPerks: perks },
+          { tierName: "INVESTOR", supplyTotal: supply.investor, priceUsd: 2500, unlockPerks: [...perks, "equity_option"], royaltyShareBps: 500 },
+        ],
+      });
+
+      // Calculate initial valuation
+      await api.valuation.recalculate(songId);
+      const v = await api.valuation.get(songId);
+      if (v) setValuation(v);
+
+      // Create business plan
+      const plan = await api.businessPlan.create({
+        clientId,
+        songId,
+        selectedTier,
+      });
+
+      router.push(`/master-plan/${plan.id}/profile`);
+    } catch (err) {
+      console.error("Configuration failed:", err);
+    }
+    setConfiguring(false);
+  };
+
+  return (
+    <div className="min-h-screen p-8 max-w-5xl mx-auto space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Bundle Builder</h1>
+          <p className="text-sm text-neutral-400 mt-1">{song?.title || "Loading..."}</p>
+        </div>
+        <PipelineBadge mode={song?.pipelineMode || "HYBRID"} />
+      </div>
+
+      {/* Song/Video Preview */}
+      <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4">
+        <div className="bg-neutral-900 rounded-[12px] aspect-video max-h-48 flex items-center justify-center">
+          <div className="text-center">
+            <p className="text-2xl mb-1">🎵</p>
+            <p className="text-sm text-neutral-400">Teaser preview will auto-cut from your approved assets</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Product Tier Selection */}
+      <div>
+        <h2 className="text-sm font-semibold mb-3">Select Product Tier</h2>
+        <TierSelector tiers={PRODUCT_TIERS} selectedId={selectedTier} onSelect={setSelectedTier} />
+      </div>
+
+      {/* NFT Configurator */}
+      <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-6 space-y-4">
+        <h2 className="text-sm font-semibold">NFT Configurator</h2>
+
+        <div className="grid grid-cols-3 gap-4">
+          {(["collector", "superfan", "investor"] as const).map(tier => (
+            <div key={tier}>
+              <label className="text-xs text-neutral-400 capitalize">{tier} Supply</label>
+              <input
+                type="number"
+                value={supply[tier]}
+                onChange={e => setSupply({ ...supply, [tier]: parseInt(e.target.value) || 0 })}
+                className="w-full mt-1 bg-neutral-900 border border-neutral-500 rounded-md p-2 text-sm"
+              />
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="text-xs text-neutral-400">Royalty %</label>
+            <input
+              type="number"
+              value={royaltyPct}
+              onChange={e => setRoyaltyPct(parseInt(e.target.value) || 0)}
+              className="w-full mt-1 bg-neutral-900 border border-neutral-500 rounded-md p-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-neutral-400">Chain</label>
+            <select
+              value={chain}
+              onChange={e => setChain(e.target.value)}
+              className="w-full mt-1 bg-neutral-900 border border-neutral-500 rounded-md p-2 text-sm"
+            >
+              <option value="POLYGON">Polygon</option>
+              <option value="BASE">Base</option>
+              <option value="ETHEREUM">Ethereum</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs text-neutral-400 block mb-2">Unlock Perks</label>
+          <div className="flex flex-wrap gap-4 text-sm">
+            {[
+              { key: "exclusive_cut", label: "Exclusive Cut" },
+              { key: "discord_role", label: "Discord Role" },
+              { key: "equity_option", label: "Equity Option" },
+              { key: "meet_greet", label: "Meet & Greet" },
+            ].map(perk => (
+              <label key={perk.key} className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={perks.includes(perk.key)}
+                  onChange={() => togglePerk(perk.key)}
+                  className="accent-primary"
+                />
+                {perk.label}
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {perks.includes("equity_option") && <DisclaimerBanner type="securities" />}
+      </div>
+
+      {/* Valuation */}
+      {valuation && <ValuationCard valuation={valuation} />}
+
+      {/* Actions */}
+      <div className="flex justify-end gap-3">
+        <button className="border border-neutral-500 rounded-md px-5 py-2.5 text-sm">Save Draft</button>
+        <button
+          onClick={handleConfigure}
+          disabled={configuring || !clientId}
+          className="bg-primary text-white rounded-md px-5 py-2.5 text-sm font-medium disabled:opacity-40"
+        >
+          {configuring ? "Configuring..." : "Configure & Create Master Plan →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+EOF
+
+# ─────────────────────────────────────
+# UPDATE DASHBOARD OVERVIEW - ADD STUDIO LINK
+# ─────────────────────────────────────
+cat > 'app/dashboard/[clientId]/page.tsx' << 'EOF'
+"use client";
+import { useEffect, useState } from "react";
+import { useParams } from "next/navigation";
+import { api } from "@/lib/api";
+import { KpiCard } from "@/components/dashboard/KpiCard";
+import { TrendChart } from "@/components/dashboard/TrendChart";
+import Link from "next/link";
+
+export default function OverviewTab() {
+  const params = useParams();
+  const clientId = params.clientId as string;
+  const [overview, setOverview] = useState<any>(null);
+
+  useEffect(() => {
+    api.dashboard.overview(clientId).then(setOverview).catch(() => {});
+  }, [clientId]);
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <KpiCard label="Current Value" value={`$${overview?.currentValue?.toLocaleString() ?? "0"}`} />
+        <KpiCard label="Revenue (MTD)" value={`$${overview?.revenueMtd?.toLocaleString() ?? "0"}`} />
+        <KpiCard label="NFTs Sold" value={overview?.nftsSold ?? "0 / 0"} />
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4">
+          <p className="text-sm font-semibold mb-2">Reach Trend (30d)</p>
+          <TrendChart data={overview?.reachTrend ?? []} dataKey="reach" />
+        </div>
+        <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4">
+          <p className="text-sm font-semibold mb-2">Valuation Trend (30d)</p>
+          <TrendChart data={overview?.valuationTrend ?? []} dataKey="value" />
+        </div>
+      </div>
+      <div className="bg-neutral-700 border border-neutral-500 rounded-[16px] p-4">
+        <p className="text-sm font-semibold mb-3">Quick Actions</p>
+        <div className="flex flex-wrap gap-4">
+          <Link href="/studio/song/new" className="bg-primary text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-primary/90">
+            + Create New Song
+          </Link>
+          <Link href="/admin/review-queue" className="border border-neutral-500 px-4 py-2 rounded-md text-sm hover:bg-neutral-700">
+            Review Queue
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+EOF
+
+echo ""
+echo "✅ Studios + Bundle Builder patched."
+echo ""
+echo "The full pipeline flow is now:"
+echo "  1. Dashboard → '+ Create New Song'"
+echo "  2. Song Studio → fill details → Generate Draft"
+echo "  3. Watch pipeline progress → Approve"
+echo "  4. → Create Music Video"
+echo "  5. Video Studio → add scenes → Generate → Approve"
+echo "  6. → Bundle Builder → configure NFT → Create Master Plan"
+echo "  7. → Master Plan wizard (5 steps)"
+ENDOFSCRIPT
+
+echo "Script saved. Now run:"
+echo "  cd ~/projects/polsia && bash patch_studios.sh"
